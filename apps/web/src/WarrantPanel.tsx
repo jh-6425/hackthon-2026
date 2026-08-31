@@ -212,10 +212,6 @@ export function WarrantPanel({ run, warrant, onDecided, onError }: WarrantPanelP
               <dd><code className="chip chip-deny">{containment.clause}</code></dd>
             </div>
             <div>
-              <dt>Files reverted</dt>
-              <dd>{containment.rolledBack ? containment.fileCount + " files restored" : "not rolled back"}</dd>
-            </div>
-            <div>
               <dt>Before digest</dt>
               <dd className="proof-wrap"><code>{shortDigest(containment.beforeDigest)}</code></dd>
             </div>
@@ -234,8 +230,22 @@ export function WarrantPanel({ run, warrant, onDecided, onError }: WarrantPanelP
               </dd>
             </div>
             <div>
+              <dt>Files reverted</dt>
+              <dd>
+                {containment.recoveryFailed ? (
+                  <span className="proof-bad">rollback FAILED</span>
+                ) : (
+                  containment.rolledBack ? containment.fileCount + " files restored" : "not rolled back"
+                )}
+              </dd>
+            </div>
+            <div>
               <dt>Agent status</dt>
-              <dd><span className="proof-ok">recovered to ready</span></dd>
+              <dd>
+                <span className={containment.recoveryFailed ? "proof-bad" : "proof-ok"}>
+                  {containment.recoveryFailed ? "QUARANTINED — rollback failed" : "recovered to ready"}
+                </span>
+              </dd>
             </div>
           </dl>
         </div>

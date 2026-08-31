@@ -19,6 +19,7 @@ export interface WarrantScope {
   writePaths: string[];
   commands: string[];
   denyCommands: string[];
+  tools: string[];
   networkEgress: boolean;
   maxFileWrites: number;
   maxCommands: number;
@@ -47,6 +48,7 @@ export interface RunContainment {
   beforeDigest: string | null;
   afterDigest: string | null;
   assetDigestMatches: boolean;
+  recoveryFailed: boolean;
   rolledBack: boolean;
   digestMatches: boolean;
   fileCount: number;

@@ -24,6 +24,7 @@ const truncate = (value: string, limit = 400): string =>
 export class ConformanceMonitor implements RunObserver {
   private usage: WarrantUsage = emptyUsage();
   private readonly evaluated = new Set<string>();
+  private readonly evaluatedPaths = new Map<string, Set<string>>();
   private readonly narrated = new Set<string>();
   private readonly collected: TraceSpan[] = [];
   private violationState: WarrantViolation | null = null;
@@ -63,6 +64,17 @@ export class ConformanceMonitor implements RunObserver {
 
     const action = itemToAction(item, this.workspaceRoots);
     if (!action) return;
+
+    if (action.kind === "file_change") {
+      const seen = this.evaluatedPaths.get(action.itemId) ?? new Set<string>();
+      const fresh = action.paths.filter((path) => !seen.has(path));
+      if (fresh.length === 0) return;
+      for (const path of fresh) seen.add(path);
+      this.evaluatedPaths.set(action.itemId, seen);
+      this.inspect({ kind: "file_change", itemId: action.itemId, paths: fresh });
+      return;
+    }
+
     const key = action.kind + ":" + action.itemId;
     if (this.evaluated.has(key)) return;
     this.evaluated.add(key);

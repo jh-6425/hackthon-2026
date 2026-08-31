@@ -13,6 +13,7 @@ export class WarrantViolationError extends Error {
     public readonly clause: string,
     public readonly reason: string,
     public readonly action: string,
+    public readonly subject: string | null = null,
   ) {
     super("Warrant violation (" + clause + "): " + reason);
     this.name = "WarrantViolationError";

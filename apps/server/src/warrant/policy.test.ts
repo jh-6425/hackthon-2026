@@ -24,6 +24,7 @@ function makeWarrant(
       writePaths: ["src/**", "tests/**"],
       commands: ["npm", "node", "ls", "cat"],
       denyCommands: ["rm"],
+      tools: [],
       networkEgress: false,
       maxFileWrites: 10,
       maxCommands: 20,
@@ -298,5 +299,40 @@ describe("applyUsage", () => {
     usage = applyUsage(command("npm test"), usage);
     usage = applyUsage(fileChange("src/a.ts", "src/b.ts"), usage);
     expect(usage).toEqual({ commands: 1, fileWrites: 2 });
+  });
+});
+
+describe("evaluateAction: tool calls are fail-closed", () => {
+  it("blocks an MCP tool that is not in the warranted tool set (REFUSED-style scope)", () => {
+    const decision = evaluateAction(
+      { kind: "tool_call", itemId: "t1", tool: "github_create_issue" },
+      makeWarrant({ tools: [] }),
+      emptyUsage(),
+    );
+    expect(decision.verdict).toBe("block");
+    expect(decision.clause).toBe("scope.tools");
+    expect(decision.subject).toBe("github_create_issue");
+  });
+
+  it("allows an MCP tool only when it is explicitly warranted", () => {
+    const decision = evaluateAction(
+      { kind: "tool_call", itemId: "t1", tool: "github_create_issue" },
+      makeWarrant({ tools: ["github_create_issue"] }),
+      emptyUsage(),
+    );
+    expect(decision.verdict).toBe("allow");
+  });
+});
+
+describe("evaluateAction: multi-path file change reports the real offender", () => {
+  it("blocks on the second, out-of-scope path and names it as the subject", () => {
+    const decision = evaluateAction(
+      { kind: "file_change", itemId: "f1", paths: ["tests/ok.ts", "src/parser.ts"] },
+      makeWarrant({ writePaths: ["tests/**"] }),
+      emptyUsage(),
+    );
+    expect(decision.verdict).toBe("block");
+    expect(decision.clause).toBe("scope.writePaths");
+    expect(decision.subject).toBe("src/parser.ts");
   });
 });

@@ -18,7 +18,9 @@ import {
   type IntentCompiler,
 } from "./warrant/compiler.js";
 import { ConformanceMonitor } from "./warrant/monitor.js";
-import { WorkspaceSnapshot, digestFileAt } from "./warrant/snapshot.js";
+import { WorkspaceSnapshot, changedPaths, digestFileAt } from "./warrant/snapshot.js";
+import { matchesAny } from "./warrant/glob.js";
+import type { AgentAction, PolicyDecision } from "./warrant/types.js";
 import type {
   RunContainment,
   TraceSpan,
@@ -27,17 +29,23 @@ import type {
 import { WorkspaceManager } from "./workspace.js";
 
 function selectCompiler(config: AppConfig): IntentCompiler {
-  // WARRANT_COMPILER pins the scope source. "local" is deterministic and offline
-  // (fixed least-privilege scope); "ark" uses the model; "auto" uses local for
-  // replay and the Ark compiler (which itself falls back to local) otherwise.
+  // Replay/offline mode never reaches the network, regardless of WARRANT_COMPILER.
+  if (config.runtimeProvider === "replay") return new LocalIntentCompiler();
+  // "local" is deterministic and offline. "ark" is STRICT: it errors if Ark is
+  // unavailable rather than silently using local scope. "auto" uses the Ark
+  // compiler with a local fallback.
   if (config.warrantCompiler === "local") return new LocalIntentCompiler();
-  if (config.warrantCompiler === "ark") return new WarrantCompiler(config);
-  return config.runtimeProvider === "replay"
-    ? new LocalIntentCompiler()
-    : new WarrantCompiler(config);
+  if (config.warrantCompiler === "ark") return new WarrantCompiler(config, true);
+  return new WarrantCompiler(config);
 }
 
 const now = () => new Date().toISOString();
+
+export const QUARANTINE_PREFIX = "QUARANTINED: ";
+
+function describeStray(stray: { paths: string[] }): string {
+  return stray.paths.join(", ");
+}
 
 export class AgentService {
   private readonly activeExecutions = new Map<string, Promise<void>>();
@@ -197,6 +205,12 @@ export class AgentService {
     }
     if (agent.status === "busy") {
       throw new HttpError(409, "This Agent is already running");
+    }
+    if (agent.lastError?.startsWith(QUARANTINE_PREFIX)) {
+      throw new HttpError(
+        423,
+        "This Agent is quarantined after a failed rollback. Stop and restart it to clear the quarantine.",
+      );
     }
 
     const runId = randomUUID();
@@ -471,7 +485,22 @@ export class AgentService {
         observer: monitor,
       });
       await this.persistSpans(monitor.spans);
-      await snapshot.discard();
+
+      // Reconcile the workspace against the pre-run snapshot. This catches
+      // out-of-band mutations that never surfaced as a file_change event (for
+      // example a poisoned package.json whose npm subprocess edits src/parser.ts,
+      // or a replay whose reported path disagreed with what it wrote).
+      const stray = await this.reconcile(snapshot, warrant);
+      if (stray) {
+        throw new WarrantViolationError(
+          stray.decision.clause,
+          stray.decision.reason,
+          describeStray(stray),
+          stray.decision.subject,
+        );
+      }
+
+      await snapshot.discard().catch(() => undefined);
       const completedAt = now();
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
@@ -500,10 +529,11 @@ export class AgentService {
       const violation = error instanceof WarrantViolationError ? error : null;
       const message = error instanceof Error ? error.message : String(error);
       const containment = violation
-        ? await this.contain(violation, snapshot, warrant, monitor.violation?.action ?? null)
+        ? await this.contain(violation, snapshot, warrant)
         : null;
       await this.persistSpans(monitor.spans);
-      if (!violation) await snapshot.discard();
+      if (!violation) await snapshot.discard().catch(() => undefined);
+      const quarantined = containment?.recoveryFailed === true;
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);
@@ -518,10 +548,18 @@ export class AgentService {
           storedRun.completedAt = completedAt;
         }
         if (agent) {
-          if (agent.status !== "stopped") {
-            agent.status = cancelled || violation ? "ready" : "error";
+          if (quarantined) {
+            // Rollback failed: the workspace may still hold the unauthorized
+            // change. Quarantine the Agent so no further run can start until an
+            // operator explicitly stops and restarts it.
+            agent.status = "error";
+            agent.lastError = QUARANTINE_PREFIX + message;
+          } else {
+            if (agent.status !== "stopped") {
+              agent.status = cancelled || violation ? "ready" : "error";
+            }
+            agent.lastError = cancelled || violation ? null : message;
           }
-          agent.lastError = cancelled || violation ? null : message;
           agent.updatedAt = completedAt;
         }
       });
@@ -547,10 +585,10 @@ export class AgentService {
     violation: WarrantViolationError,
     snapshot: WorkspaceSnapshot | null,
     warrant: Warrant,
-    action: import("./warrant/types.js").AgentAction | null,
   ): Promise<RunContainment> {
-    const protectedAsset =
-      action && action.kind === "file_change" ? (action.paths[0] ?? null) : null;
+    // The offending path is the policy decision's subject (the actual violating
+    // path in a multi-path event), not simply the first path.
+    const protectedAsset = violation.subject;
     const beforeDigest = protectedAsset ? (snapshot?.fileDigest(protectedAsset) ?? null) : null;
     const containment: RunContainment = {
       clause: violation.clause,
@@ -561,14 +599,18 @@ export class AgentService {
       beforeDigest,
       afterDigest: null,
       assetDigestMatches: false,
+      recoveryFailed: false,
       rolledBack: false,
       digestMatches: false,
       fileCount: 0,
     };
-    if (!snapshot) return containment;
+    if (!snapshot) {
+      // No snapshot means no rollback was possible: this is a recovery failure.
+      return { ...containment, recoveryFailed: true };
+    }
     try {
       const report = await snapshot.restore();
-      await snapshot.discard();
+      await snapshot.discard().catch(() => undefined);
       const afterDigest = protectedAsset
         ? await digestFileAt(this.workspacePathFor(warrant.agentId), protectedAsset)
         : null;
@@ -581,8 +623,53 @@ export class AgentService {
         fileCount: report.fileCount,
       };
     } catch {
-      return containment;
+      // Rollback threw: the workspace may still hold the unauthorized change.
+      await snapshot.discard().catch(() => undefined);
+      return { ...containment, recoveryFailed: true };
     }
+  }
+
+  /**
+   * Compare the workspace to its pre-run snapshot after a run the monitor let
+   * finish. Any changed path outside the warranted write scope is an out-of-band
+   * mutation (npm subprocess, replay path spoof) and is surfaced as a
+   * scope.writePaths violation so the run is contained and rolled back.
+   */
+  private async reconcile(
+    snapshot: WorkspaceSnapshot,
+    warrant: Warrant,
+  ): Promise<{ decision: PolicyDecision; paths: string[] } | null> {
+    let after: Awaited<ReturnType<WorkspaceSnapshot["currentDigest"]>>;
+    try {
+      after = await snapshot.currentDigest();
+    } catch {
+      // Cannot read the workspace to verify it: fail closed.
+      return {
+        decision: {
+          verdict: "block",
+          clause: "scope.writePaths",
+          reason: "The workspace could not be verified after the run",
+          subject: null,
+        },
+        paths: [],
+      };
+    }
+    const changed = changedPaths(snapshot.digest, after);
+    const stray = changed.filter((path) => !matchesAny(warrant.scope.writePaths, path));
+    if (stray.length === 0) return null;
+    const offender = stray[0] ?? null;
+    return {
+      decision: {
+        verdict: "block",
+        clause: "scope.writePaths",
+        reason:
+          "Path '" +
+          offender +
+          "' changed on disk but is outside the warranted write scope (no matching file event was reported)",
+        subject: offender,
+      },
+      paths: stray,
+    };
   }
 
   private workspacePathFor(agentId: string): string {

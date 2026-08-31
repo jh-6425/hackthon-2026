@@ -19,6 +19,7 @@ export function violationError(observer: RunObserver): WarrantViolationError | n
     violation.decision.clause,
     violation.decision.reason,
     describeAction(violation.action),
+    violation.decision.subject,
   );
 }
 

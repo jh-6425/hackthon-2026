@@ -30,6 +30,7 @@ export const REFUSED_SCOPE: WarrantScope = {
   writePaths: [],
   commands: [],
   denyCommands: [...DENY_COMMANDS],
+  tools: [],
   networkEgress: false,
   maxFileWrites: 0,
   maxCommands: 0,
@@ -58,7 +59,25 @@ export class LocalIntentCompiler implements IntentCompiler {
 
   infer(prompt: string): InferredScope {
     const text = prompt.toLowerCase();
-    const mentionsTest = /\btest(s|ing|ed)?\b|\bspec\b|\bvitest\b|\bjest\b/.test(text);
+
+    // Read-only / negation semantics must never grant write scope.
+    const readOnly =
+      /\b(do not|don't|dont|do NOT|never|without)\s+(modify|change|edit|write|touch|create)/.test(text) ||
+      /\bread[- ]?only\b/.test(text) ||
+      /\b(inspect|review|read)\b.*\b(only|no changes?)\b/.test(text) ||
+      /(不要|不得|禁止|请勿|勿|别)\s*(修改|更改|改动|编辑|写入|变更|创建)/.test(prompt) ||
+      /只读|不修改|不改动/.test(prompt);
+    if (readOnly) {
+      return {
+        summary:
+          "The task appears read-only or explicitly forbids changes; no write scope is granted. Widen the warrant explicitly if edits are truly required.",
+        scope: REFUSED_SCOPE,
+      };
+    }
+
+    const mentionsTest =
+      /\btest(s|ing|ed)?\b|\bspec\b|\bvitest\b|\bjest\b/.test(text) ||
+      /测试|单元测试|用例/.test(prompt);
 
     if (mentionsTest) {
       return {
@@ -67,6 +86,7 @@ export class LocalIntentCompiler implements IntentCompiler {
           writePaths: ["tests/**"],
           commands: ["npm"],
           denyCommands: [...DENY_COMMANDS],
+          tools: [],
           networkEgress: false,
           maxFileWrites: 2,
           maxCommands: 1,
@@ -135,6 +155,7 @@ function toScope(compiled: CompiledScope): WarrantScope {
     writePaths: compiled.writePaths,
     commands: compiled.commands.filter((name) => !denied.has(name)),
     denyCommands: [...denied],
+    tools: [],
     networkEgress: compiled.networkEgress,
     maxFileWrites: compiled.maxFileWrites,
     maxCommands: compiled.maxCommands,
@@ -173,11 +194,19 @@ function issue(
 export class WarrantCompiler implements IntentCompiler {
   private readonly local = new LocalIntentCompiler();
 
-  constructor(private readonly config: AppConfig) {}
+  constructor(
+    private readonly config: AppConfig,
+    private readonly strict = false,
+  ) {}
 
   async compile(agent: Agent, prompt: string, runId: string | null): Promise<Warrant> {
     const compiled = await this.compileWithModel(agent, prompt);
     if (!compiled) {
+      if (this.strict) {
+        throw new Error(
+          "WARRANT_COMPILER=ark could not compile a warrant (Ark unavailable or returned an invalid scope). Refusing to fall back to local scope in strict mode.",
+        );
+      }
       return this.local.compile(agent, prompt, runId);
     }
     return issue(agent, prompt, runId, compiled.summary, toScope(compiled), "model");

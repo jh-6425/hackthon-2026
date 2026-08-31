@@ -42,17 +42,17 @@ const SECRET_REFERENCES = [
   /\bid_rsa\b/,
 ];
 
-const allow = (clause: string, reason: string): PolicyDecision => ({
-  verdict: "allow",
-  clause,
-  reason,
-});
+const allow = (
+  clause: string,
+  reason: string,
+  subject: string | null = null,
+): PolicyDecision => ({ verdict: "allow", clause, reason, subject });
 
-const block = (clause: string, reason: string): PolicyDecision => ({
-  verdict: "block",
-  clause,
-  reason,
-});
+const block = (
+  clause: string,
+  reason: string,
+  subject: string | null = null,
+): PolicyDecision => ({ verdict: "block", clause, reason, subject });
 
 function stripOuterQuotes(value: string): string {
   const trimmed = value.trim();
@@ -207,7 +207,7 @@ function evaluateCommand(
       );
     }
   }
-  return allow("scope.commands", "All " + segments.length + " command segments are warranted");
+  return allow("scope.commands", "All " + segments.length + " command segments are warranted", commandBinary(segments[0] ?? ""));
 }
 
 function evaluateFileChange(
@@ -227,16 +227,22 @@ function evaluateFileChange(
       return block(
         "scope.writePaths",
         "Path '" + path + "' resolves outside the Agent workspace",
+        path,
       );
     }
     if (!matchesAny(scope.writePaths, path)) {
       return block(
         "scope.writePaths",
         "Path '" + path + "' is outside the warranted write scope",
+        path,
       );
     }
   }
-  return allow("scope.writePaths", "All " + paths.length + " paths are within the write scope");
+  return allow(
+    "scope.writePaths",
+    "All " + paths.length + " paths are within the write scope",
+    paths[0] ?? null,
+  );
 }
 
 export function evaluateAction(
@@ -258,9 +264,17 @@ export function evaluateAction(
     return block(
       "scope.networkEgress",
       "Tool '" + action.tool + "' reaches the network, which this warrant forbids",
+      action.tool,
     );
   }
-  return allow("scope.toolCalls", "Tool '" + action.tool + "' is permitted");
+  if (!warrant.scope.tools.includes(action.tool)) {
+    return block(
+      "scope.tools",
+      "Tool '" + action.tool + "' is not in the warranted tool set",
+      action.tool,
+    );
+  }
+  return allow("scope.tools", "Tool '" + action.tool + "' is permitted", action.tool);
 }
 
 export function applyUsage(action: AgentAction, usage: WarrantUsage): WarrantUsage {

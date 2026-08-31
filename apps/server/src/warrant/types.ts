@@ -13,6 +13,7 @@ export interface WarrantScope {
   writePaths: string[];
   commands: string[];
   denyCommands: string[];
+  tools: string[];
   networkEgress: boolean;
   maxFileWrites: number;
   maxCommands: number;
@@ -46,6 +47,7 @@ export interface PolicyDecision {
   verdict: Verdict;
   clause: string;
   reason: string;
+  subject: string | null;
 }
 
 export type SpanKind = ActionKind | "run" | "reasoning" | "message";
@@ -87,6 +89,7 @@ export interface RunContainment {
   beforeDigest: string | null;
   afterDigest: string | null;
   assetDigestMatches: boolean;
+  recoveryFailed: boolean;
   rolledBack: boolean;
   digestMatches: boolean;
   fileCount: number;

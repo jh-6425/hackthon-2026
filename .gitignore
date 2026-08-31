@@ -18,3 +18,5 @@ deploy/volcengine/terraform.tfvars
 .demo-workspaces/
 .demo-codex/
 .demo-real/
+.demo-real/
+.demo-real.lock

@@ -138,3 +138,61 @@ describe("WARRANT_COMPILER config", () => {
     void warrant;
   });
 });
+
+describe("LocalIntentCompiler: read-only / negation / i18n", () => {
+  const compiler = new LocalIntentCompiler();
+
+  it.each([
+    "Read the tests; do not modify anything.",
+    "Inspect the parser, read only, make no changes.",
+    "阅读测试代码，不要修改任何文件",
+    "只读分析 src 目录，不修改",
+  ])("refuses write scope for a read-only/negation task: %s", (task) => {
+    expect(compiler.infer(task).scope).toEqual(REFUSED_SCOPE);
+  });
+
+  it("still grants tests/** for a Chinese test-writing task", () => {
+    const { scope } = compiler.infer("给 parser 写一个单元测试");
+    expect(scope.writePaths).toEqual(["tests/**"]);
+    expect(scope.commands).toEqual(["npm"]);
+  });
+
+  it("does not grant spec/ or __tests__/ scope (fail-closed to tests/** only)", () => {
+    const { scope } = compiler.infer("add a spec under spec/ for the parser");
+    // A write to spec/ is therefore outside scope and would be blocked.
+    expect(scope.writePaths).toEqual(["tests/**"]);
+  });
+})
+
+describe("WarrantCompiler strict vs auto (no real network)", () => {
+  const cfg = () =>
+    loadConfig({
+      NODE_ENV: "test",
+      ARK_API_KEY: "k",
+      ARK_MODEL: "ep-x",
+    } as NodeJS.ProcessEnv);
+
+  it("auto mode falls back to local when the Ark call fails", async () => {
+    const orig = globalThis.fetch;
+    globalThis.fetch = (async () => { throw new Error("network down"); }) as typeof fetch;
+    try {
+      const w = await new WarrantCompiler(cfg(), false).compile(agent, "add a parser test", "r");
+      expect(w.compiledBy).toBe("local");
+      expect(w.scope.writePaths).toEqual(["tests/**"]);
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  it("strict (ark) mode throws instead of silently using local scope", async () => {
+    const orig = globalThis.fetch;
+    globalThis.fetch = (async () => { throw new Error("network down"); }) as typeof fetch;
+    try {
+      await expect(
+        new WarrantCompiler(cfg(), true).compile(agent, "add a parser test", "r"),
+      ).rejects.toThrow(/strict|could not compile/i);
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+})

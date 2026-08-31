@@ -14,6 +14,7 @@ const warrant: Warrant = {
     writePaths: ["src/**", "tests/**"],
     commands: ["npm", "node"],
     denyCommands: ["rm"],
+    tools: [],
     networkEgress: false,
     maxFileWrites: 10,
     maxCommands: 20,
@@ -120,3 +121,29 @@ describe("ConformanceMonitor", () => {
     expect(subject.violation).toBeNull();
   });
 });
+
+describe("ConformanceMonitor: started/completed path merge", () => {
+  it("evaluates a path first seen on item.completed even after item.started was clean", () => {
+    const testsOnly: Warrant = {
+      ...warrant,
+      scope: { ...warrant.scope, writePaths: ["tests/**"] },
+    };
+    const subject = new ConformanceMonitor(testsOnly, "run-1", ["/workspace"]);
+    subject.observe(
+      started("f1", { type: "file_change", changes: [{ path: "/workspace/tests/ok.ts" }] }),
+    );
+    expect(subject.violation).toBeNull();
+    // completed adds a NEW out-of-scope path for the same item id.
+    subject.observe(
+      completed("f1", {
+        type: "file_change",
+        changes: [
+          { path: "/workspace/tests/ok.ts" },
+          { path: "/workspace/src/parser.ts" },
+        ],
+      }),
+    );
+    expect(subject.violation?.decision.clause).toBe("scope.writePaths");
+    expect(subject.violation?.decision.subject).toBe("src/parser.ts");
+  });
+})

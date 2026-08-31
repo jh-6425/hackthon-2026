@@ -177,3 +177,54 @@ describe("Kill Switch regression matrix", () => {
     expect(settled.containment?.clause).toBe("scope.writePaths");
   });
 });
+
+describe("Replay cancellation at the service level (P2-10)", () => {
+  it("a warrant revoked mid-run ends the run as cancelled, not completed", async () => {
+    const { mkdtemp, writeFile, mkdir, rm } = await import("node:fs/promises");
+    const os = await import("node:os");
+    const pathMod = await import("node:path");
+    const { ReplayRunner } = await import("./replay-runner.js");
+
+    const root = await mkdtemp(pathMod.join(os.tmpdir(), "ks-revoke-"));
+    try {
+      const scenarioFile = pathMod.join(root, "scenario.json");
+      await writeFile(
+        scenarioFile,
+        JSON.stringify({
+          delayMs: 300,
+          events: [
+            { type: "item.completed", item: { id: "r1", type: "reasoning", text: "thinking" } },
+            { type: "item.completed", item: { id: "r2", type: "reasoning", text: "still thinking" } },
+            { type: "item.completed", item: { id: "m1", type: "agent_message", text: "done" } },
+          ],
+        }),
+      );
+      const config = loadConfig({
+        NODE_ENV: "test",
+        APP_DATA_DIR: pathMod.join(root, "data"),
+        AGENT_WORKSPACE_ROOT: pathMod.join(root, "workspaces"),
+        CODEX_HOME: pathMod.join(root, "codex"),
+        RUNTIME_PROVIDER: "replay",
+        REPLAY_SCENARIO: scenarioFile,
+        WARRANT_AUTO_APPROVE: "true",
+      } as NodeJS.ProcessEnv);
+      const service = new AgentService(
+        config,
+        new JsonStore(pathMod.join(root, "data", "db.json")),
+        new WorkspaceManager(pathMod.join(root, "workspaces")),
+        new ReplayRunner(scenarioFile),
+        new LocalIntentCompiler(),
+      );
+      await service.initialize();
+      const agent = await service.createAgent({ name: "Parser Bot" });
+      const { run, warrant } = await service.sendMessage(agent.id, TASK);
+      await new Promise((r) => setTimeout(r, 120));
+      await service.revokeWarrant(warrant.id);
+      const settled = await settle(service, run.id);
+      expect(settled.status).not.toBe("completed");
+      expect(["cancelled", "blocked"]).toContain(settled.status);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});

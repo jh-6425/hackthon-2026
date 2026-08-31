@@ -1,6 +1,8 @@
-import { readFile, stat } from "node:fs/promises";
+import { mkdir, realpath, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseCodexEventLine, violationError } from "../codex-runner.js";
+import { RunCancelledError } from "../errors.js";
+import { extractItem, itemToAction } from "./events.js";
 import type { AgentRunner, RunnerRequest, RunnerResult } from "../types.js";
 
 /**
@@ -31,22 +33,37 @@ interface Scenario {
 }
 
 export class ReplayRunner implements AgentRunner {
+  private readonly cancelled = new Set<string>();
+
   constructor(private readonly scenarioPath: string) {}
 
   async isAvailable(): Promise<boolean> {
     return true;
   }
 
-  async cancel(): Promise<boolean> {
-    return false;
+  async cancel(agentId: string): Promise<boolean> {
+    if (this.cancelled.has(agentId)) return false;
+    this.cancelled.add(agentId);
+    return true;
   }
 
   async run(request: RunnerRequest): Promise<RunnerResult> {
+    this.cancelled.delete(request.agentId);
+    try {
+      return await this.replay(request);
+    } finally {
+      this.cancelled.delete(request.agentId);
+    }
+  }
+
+  private async replay(request: RunnerRequest): Promise<RunnerResult> {
     const scenario = await this.load(request.workspacePath);
     const delay = scenario.delayMs ?? 350;
     for (const raw of scenario.events) {
+      if (this.cancelled.has(request.agentId)) throw new RunCancelledError();
       const { __write, ...event } = raw;
       if (__write) {
+        this.assertWriteMatchesEvent(__write.path, event, request.workspacePath);
         await this.applyWrite(request.workspacePath, __write);
       }
       parseCodexEventLine(
@@ -60,6 +77,9 @@ export class ReplayRunner implements AgentRunner {
       }
       if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
     }
+    // Re-check cancellation after the last event, since a run whose remaining
+    // events are only narrative (reasoning/message) would otherwise complete.
+    if (this.cancelled.has(request.agentId)) throw new RunCancelledError();
     const violation = request.observer ? violationError(request.observer) : null;
     if (violation) throw violation;
     return {
@@ -69,9 +89,35 @@ export class ReplayRunner implements AgentRunner {
     };
   }
 
+  /**
+   * A replay may not write one path while reporting another. The path it writes
+   * must be one of the file_change paths the same event reports; otherwise the
+   * scenario is inconsistent and the run is failed (and rolled back upstream).
+   */
+  private assertWriteMatchesEvent(
+    writePath: string,
+    event: Record<string, unknown>,
+    workspaceRoots: string,
+  ): void {
+    const item = extractItem(event);
+    const action = item ? itemToAction(item, [workspaceRoots]) : null;
+    if (!action || action.kind !== "file_change") return;
+    const normalizedWrite = writePath.replace(/\\/g, "/").replace(/^\.\//, "");
+    const reported = action.paths.map((p) => p.replace(/^\.\//, ""));
+    if (!reported.includes(normalizedWrite)) {
+      throw new Error(
+        "Replay scenario is inconsistent: it writes '" +
+          writePath +
+          "' but the event reports [" +
+          reported.join(", ") +
+          "]",
+      );
+    }
+  }
+
   private async load(workspacePath: string): Promise<Scenario> {
     const file = await this.resolveScenarioFile(workspacePath);
-    const raw = await readFile(file, "utf8");
+    const raw = await (await import("node:fs/promises")).readFile(file, "utf8");
     const parsed = JSON.parse(raw) as Scenario;
     if (!Array.isArray(parsed.events)) {
       throw new Error("Replay scenario must contain an events array");
@@ -97,14 +143,46 @@ export class ReplayRunner implements AgentRunner {
     workspacePath: string,
     write: { path: string; content: string },
   ): Promise<void> {
-    const { mkdir, writeFile } = await import("node:fs/promises");
     const root = path.resolve(workspacePath);
     const target = path.resolve(root, write.path);
+
+    // Lexical containment: reject `..` path components and absolute escapes.
     const relative = path.relative(root, target);
-    if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
+    const firstSegment = relative.split(path.sep)[0];
+    if (relative === "" || firstSegment === ".." || path.isAbsolute(relative)) {
       throw new Error("Replay write escapes the workspace: " + write.path);
     }
+
+    // Physical containment: resolve symlinks on the deepest existing ancestor and
+    // ensure the real location is still inside the real workspace, so a
+    // `tests -> /tmp/outside` symlink cannot smuggle a write out of the tree.
+    const realRoot = await realpath(root);
+    const realParent = await realpathAncestor(path.dirname(target));
+    const realRelative = path.relative(realRoot, realParent);
+    if (
+      realRelative !== "" &&
+      (realRelative.split(path.sep)[0] === ".." || path.isAbsolute(realRelative))
+    ) {
+      throw new Error("Replay write escapes the workspace via a symlink: " + write.path);
+    }
+
     await mkdir(path.dirname(target), { recursive: true });
     await writeFile(target, write.content);
+  }
+}
+
+/** realpath of the deepest ancestor of `p` that actually exists. */
+async function realpathAncestor(p: string): Promise<string> {
+  let current = p;
+  // Walk up until a component resolves.
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      return await realpath(current);
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return current;
+      current = parent;
+    }
   }
 }
