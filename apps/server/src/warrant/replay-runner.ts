@@ -3,7 +3,7 @@ import { lstat, mkdir, open, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { parseCodexEventLine, violationError } from "../codex-runner.js";
 import { RunCancelledError } from "../errors.js";
-import { extractItem, itemToAction } from "./events.js";
+import { extractItem, itemToAction, relativizePath } from "./events.js";
 import { canonicalizePath } from "./glob.js";
 import type { AgentRunner, RunnerRequest, RunnerResult } from "../types.js";
 
@@ -61,11 +61,21 @@ export class ReplayRunner implements AgentRunner {
   private async replay(request: RunnerRequest): Promise<RunnerResult> {
     const scenario = await this.load(request.workspacePath);
     const delay = scenario.delayMs ?? 350;
+    const executedWrites = new Set<string>();
     for (const raw of scenario.events) {
       if (this.cancelled.has(request.agentId)) throw new RunCancelledError();
       const { __write, ...event } = raw;
       if (__write) {
-        this.assertWriteMatchesEvent(__write.path, event, request.workspacePath);
+        const key = this.assertWriteMatchesEvent(__write.path, event, request.workspacePath);
+        // Reject a duplicate physical write for the same (itemId, path): the
+        // monitor de-duplicates by canonical key, so two real writes would slip
+        // past the write budget otherwise.
+        const item = extractItem(event);
+        const writeKey = (item?.id ?? item?.type ?? "?") + "|" + key;
+        if (executedWrites.has(writeKey)) {
+          throw new Error("Replay performs a duplicate physical write for " + __write.path);
+        }
+        executedWrites.add(writeKey);
         await this.applyWrite(request.workspacePath, __write);
       }
       parseCodexEventLine(
@@ -99,21 +109,22 @@ export class ReplayRunner implements AgentRunner {
   private assertWriteMatchesEvent(
     writePath: string,
     event: Record<string, unknown>,
-    workspaceRoots: string,
-  ): void {
+    workspaceRoot: string,
+  ): string {
     // Default-reject (finding 12): a __write is only permitted when the SAME
     // event resolves to a single, valid file_change action whose reported path
-    // matches the write. A narrative/unknown/malformed event carrying __write is
-    // refused so it cannot bypass per-action policy.
+    // matches the write. Both sides go through the SAME workspace-aware
+    // relativization + canonicalization so an absolute-vs-relative or ./ vs
+    // literal difference cannot cause a false accept or false reject.
     const item = extractItem(event);
-    const action = item ? itemToAction(item, [workspaceRoots]) : null;
+    const action = item ? itemToAction(item, [workspaceRoot]) : null;
     if (!action || action.kind !== "file_change" || action.paths.length === 0) {
       throw new Error(
         "Replay __write must accompany a valid file_change event; got " +
           (item?.type ?? "no item"),
       );
     }
-    const wanted = canonicalizePath(writePath);
+    const wanted = canonicalizePath(relativizePath(writePath, [workspaceRoot]));
     const reported = action.paths.map((p) => canonicalizePath(p));
     if (!reported.includes(wanted)) {
       throw new Error(
@@ -124,6 +135,7 @@ export class ReplayRunner implements AgentRunner {
           "]",
       );
     }
+    return wanted;
   }
 
   private async load(workspacePath: string): Promise<Scenario> {

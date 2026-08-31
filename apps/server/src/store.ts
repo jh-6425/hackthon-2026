@@ -16,11 +16,25 @@ const withAgentDefaults = (a: any) => ({
   quarantineReason: null,
   ...a,
 });
-const withRunDefaults = (r: any) => ({
-  containment: null,
-  diagnostics: null,
-  ...r,
-});
+const withRunDefaults = (r: any) => {
+  const run = { containment: null, diagnostics: null, ...r };
+  if (run.containment && typeof run.containment === "object") {
+    run.containment = { recoveryError: null, ...run.containment };
+  }
+  if (run.diagnostics && typeof run.diagnostics === "object") {
+    run.diagnostics = {
+      reconciliationStatus: "verified",
+      reconciliationError: null,
+      changedPaths: [],
+      reportedPaths: [],
+      outOfBandPaths: [],
+      strayPaths: [],
+      reportedWriteCount: 0,
+      ...run.diagnostics,
+    };
+  }
+  return run;
+};
 const withDefaults = (parsed: Database): Database => ({
   ...parsed,
   agents: (parsed.agents ?? []).map(withAgentDefaults),

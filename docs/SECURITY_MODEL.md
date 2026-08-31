@@ -50,10 +50,25 @@ implying a stronger guarantee.
    detached process is only covered if it implements the `settled()` lifecycle
    hook (the container and replay runners fully await their work). We cannot catch
    writes from a process we cannot observe.
-5. **`maxFileWrites` is a write-operation budget** enforced live by the monitor
-   for reported writes; the reconcile backstop adds a lower bound of unreported
-   net changes. A rename counts as its two net path changes; a create-then-delete
-   nets to zero in the diff.
+5. **`maxFileWrites` budget accounting.** During execution the monitor enforces
+   the budget on **reported write operations** (canonical-deduplicated). The
+   post-run reconcile backstop counts **changed-path units** — the net add/
+   remove/modify paths in the before/after diff — which is NOT the same as an
+   operation count: a rename counts as its 2 net path changes, a create-then-
+   delete nets to 0, and 100 silent overwrites of one file net to 1. The reconcile
+   error message says "changed-path units" so the two measures are never
+   conflated. The reconcile backstop cannot recover the exact number of hidden
+   operations; it is a conservative path-change accounting, not an exact meter.
+6. **Path canonicalization is POSIX-first.** Only `/` is treated as a separator;
+   a literal backslash is a legal POSIX filename character and is preserved (so a
+   root file `tests\evil.ts` cannot masquerade as `tests/evil.ts`). Backslash is
+   converted to `/` only on Windows.
+7. **Case-insensitive filesystems** (default macOS/APFS, NTFS) are not fully
+   modelled: a write to `tests/foo.ts` when `tests/Foo.ts` exists on disk may be
+   counted as a distinct changed path. Warrant does not lowercase paths (that
+   would break case-sensitive Linux, the container Runtime). On a case-insensitive
+   volume this can over-count the budget or over-report a stray; it never
+   under-blocks. Treat case-only distinctions as a known limitation.
 
 ## One-line summary for judges
 

@@ -1,5 +1,13 @@
 const REGEXP_SPECIALS = /[.+^${}()|[\]\\]/g;
 
+// Only convert backslashes to "/" on Windows. On POSIX a backslash is a legal
+// filename character and MUST NOT be treated as a path separator, or a literal
+// root file "tests\\evil.ts" would falsely match "tests/**".
+const IS_WINDOWS = process.platform === "win32";
+export function toSlash(input: string): string {
+  return IS_WINDOWS ? input.replace(/\\/g, "/") : input;
+}
+
 export function globToRegExp(pattern: string): RegExp {
   let source = "";
   let index = 0;
@@ -32,11 +40,11 @@ export function globToRegExp(pattern: string): RegExp {
 }
 
 export function normalizePath(input: string): string {
-  return input.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
+  return toSlash(input).replace(/^\.\//, "").replace(/^\/+/, "");
 }
 
 export function escapesWorkspace(input: string): boolean {
-  const normalized = input.replace(/\\/g, "/");
+  const normalized = toSlash(input);
   if (normalized.startsWith("/") || /^[a-zA-Z]:/.test(normalized)) return true;
   return normalized
     .split("/")

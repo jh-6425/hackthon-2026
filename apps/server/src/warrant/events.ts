@@ -1,4 +1,4 @@
-import { normalizePath } from "./glob.js";
+import { normalizePath, toSlash } from "./glob.js";
 import type { AgentAction } from "./types.js";
 
 export interface RuntimeItem {
@@ -23,9 +23,9 @@ export function extractItem(event: Record<string, unknown>): RuntimeItem | null 
 }
 
 export function relativizePath(candidate: string, workspaceRoots: string[]): string {
-  const normalized = candidate.replace(/\\/g, "/");
+  const normalized = toSlash(candidate);
   for (const root of workspaceRoots) {
-    const base = root.replace(/\\/g, "/").replace(/\/+$/, "");
+    const base = toSlash(root).replace(/\/+$/, "");
     if (normalized.startsWith(base + "/")) {
       return normalizePath(normalized.slice(base.length + 1));
     }

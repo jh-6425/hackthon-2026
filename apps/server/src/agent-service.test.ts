@@ -877,3 +877,125 @@ describe("Kill Switch hardening (review round 5 — bounded)", () => {
     await expect.poll(() => service.getRun(run.id).status).toBe("failed");
   });
 });
+
+describe("Review 6 fixes (bounded)", () => {
+  const T = "Add one unit test for the parser and summarise what you changed.";
+
+  it("R6-1: a literal-backslash root file is not matched by tests/** and is blocked", async () => {
+    const runner = new ScriptedRunner(async (request) => {
+      const { writeFile } = await import("node:fs/promises");
+      // A single root-level file whose NAME contains a backslash (POSIX).
+      await writeFile(path.join(request.workspacePath, "tests\\evil.ts"), "x");
+    });
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, T);
+    await expect.poll(() => service.getRun(run.id).status).toBe("blocked");
+    expect(service.getRun(run.id).containment?.clause).toBe("scope.writePaths");
+    expect(service.getRun(run.id).diagnostics?.strayPaths).toContain("tests\\evil.ts");
+    // the unauthorized root file was rolled back
+    const gone = await import("node:fs/promises")
+      .then((m) => m.readFile(path.join(agent.workspacePath, "tests\\evil.ts"), "utf8"))
+      .then(() => false).catch(() => true);
+    expect(gone).toBe(true);
+  });
+
+  it("R6-2: a run is blocked even when the Runner ignores observer.violation", async () => {
+    // Runner reports 3 paths in one event (over budget=2), monitor blocks, but the
+    // Runner does NOT rethrow and returns a valid result.
+    const runner = {
+      async run(request: { observer?: { observe: (e: unknown) => void; violation: unknown } }) {
+        request.observer?.observe({
+          type: "item.completed",
+          item: { id: "f1", type: "file_change", changes: [{ path: "tests/a.ts" }, { path: "tests/b.ts" }, { path: "tests/c.ts" }] },
+        });
+        // deliberately ignore observer.violation
+        return { output: "done anyway", threadId: "t", usage: null };
+      },
+      async cancel() { return false; },
+      async isAvailable() { return true; },
+    };
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, T);
+    await expect.poll(() => service.getRun(run.id).status).toBe("blocked");
+    expect(service.getRun(run.id).containment?.clause).toBe("scope.maxFileWrites");
+  });
+
+  it("R6-8: an unverifiable workspace is marked unverifiable, not clean", async () => {
+    const runner = new ScriptedRunner(async () => {});
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { WorkspaceSnapshot } = await import("./warrant/snapshot.js");
+    const orig = WorkspaceSnapshot.prototype.currentDigest;
+    WorkspaceSnapshot.prototype.currentDigest = async function () { throw Object.assign(new Error("EIO"), { code: "EIO" }); };
+    try {
+      const { run } = await service.sendMessage(agent.id, T);
+      await expect.poll(() => service.getRun(run.id).status).toBe("blocked");
+      expect(service.getRun(run.id).diagnostics?.reconciliationStatus).toBe("unverifiable");
+      expect(service.getRun(run.id).diagnostics?.reconciliationError).toBeTruthy();
+    } finally {
+      WorkspaceSnapshot.prototype.currentDigest = orig;
+    }
+  });
+
+  it("R6-9: an empty-message error still yields a non-empty terminal error", async () => {
+    const runner = { async run() { throw new Error(""); }, async cancel() { return false; }, async isAvailable() { return true; } };
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, T);
+    await expect.poll(() => service.getRun(run.id).status).toBe("failed");
+    expect((service.getRun(run.id).error ?? "").length).toBeGreaterThan(0);
+  });
+
+  it("R6-11: usage as an array / with extra field fails closed; clean usage is whitelisted", async () => {
+    const bad = { async run() { return { output: "ok", threadId: "t", usage: [] }; }, async cancel() { return false; }, async isAvailable() { return true; } };
+    const s1 = await makeService(bad, {}, { withSrc: true });
+    const a1 = await s1.createAgent({ name: "Parser Bot" });
+    const r1 = (await s1.sendMessage(a1.id, T)).run;
+    await expect.poll(() => s1.getRun(r1.id).status).toBe("failed");
+
+    const extra = { async run() { return { output: "ok", threadId: "t", usage: { outputTokens: 3, secret: "leak" } }; }, async cancel() { return false; }, async isAvailable() { return true; } };
+    const s2 = await makeService(extra, {}, { withSrc: true });
+    const a2 = await s2.createAgent({ name: "Parser Bot" });
+    const r2 = (await s2.sendMessage(a2.id, T)).run;
+    await expect.poll(() => s2.getRun(r2.id).status).toBe("completed");
+    expect(s2.getRun(r2.id).usage).toEqual({ outputTokens: 3 }); // whitelisted, no `secret`
+  });
+});
+
+describe("maxFileWrites changed-path semantics (R6-5 contract)", () => {
+  const T = "Add one unit test for the parser and summarise what you changed.";
+  const mk = async (fn: (ws: string) => Promise<void>) => {
+    const runner = new ScriptedRunner(async (request) => { await fn(request.workspacePath); });
+    const service = await makeService(runner, {}, { withSrc: true }); // maxFileWrites 2
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, T);
+    for (let i = 0; i < 60; i++) {
+      const st = service.getRun(run.id).status;
+      if (["completed", "blocked", "failed", "cancelled"].includes(st)) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    return service.getRun(run.id);
+  };
+  const fsp = () => import("node:fs/promises");
+
+  it("100 silent overwrites of ONE file net to 1 changed path -> within budget", async () => {
+    const run = await mk(async (ws) => {
+      const { mkdir, writeFile } = await fsp();
+      await mkdir(path.join(ws, "tests"), { recursive: true });
+      for (let i = 0; i < 100; i++) await writeFile(path.join(ws, "tests", "a.ts"), "v" + i);
+    });
+    expect(run.status).toBe("completed");
+  });
+
+  it("create-then-delete nets to 0 changed paths -> within budget", async () => {
+    const run = await mk(async (ws) => {
+      const { mkdir, writeFile, rm } = await fsp();
+      await mkdir(path.join(ws, "tests"), { recursive: true });
+      await writeFile(path.join(ws, "tests", "tmp.ts"), "x");
+      await rm(path.join(ws, "tests", "tmp.ts"));
+    });
+    expect(run.status).toBe("completed");
+  });
+});

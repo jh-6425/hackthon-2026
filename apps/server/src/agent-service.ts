@@ -22,6 +22,7 @@ import {
 import { ConformanceMonitor } from "./warrant/monitor.js";
 import { WorkspaceSnapshot, changedPaths, digestFileAt } from "./warrant/snapshot.js";
 import { canonicalizePath, matchesAny } from "./warrant/glob.js";
+import { describeAction } from "./warrant/events.js";
 import type { AgentAction, PolicyDecision } from "./warrant/types.js";
 import type {
   RunContainment,
@@ -52,8 +53,10 @@ function describeStray(stray: { paths: string[] }): string {
 /** Never throws, even on a hostile Symbol.toPrimitive / getter. */
 export function safeErrorMessage(error: unknown): string {
   try {
-    if (error instanceof Error && typeof error.message === "string") return error.message;
-    if (typeof error === "string") return error;
+    if (error instanceof Error && typeof error.message === "string") {
+      return error.message.trim().length > 0 ? error.message : "Error (no message)";
+    }
+    if (typeof error === "string") return error.trim().length > 0 ? error : "empty error string";
     if (typeof error === "number" || typeof error === "boolean") return String(error);
     if (error === null) return "null error";
     if (error === undefined) return "unknown error";
@@ -63,31 +66,38 @@ export function safeErrorMessage(error: unknown): string {
   }
 }
 
-function isSafeTokenCount(value: unknown): boolean {
-  return (
-    value === undefined ||
-    (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
-  );
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
 }
 
-function isValidResult(value: unknown): value is RunnerResult {
-  if (typeof value !== "object" || value === null) return false;
-  const r = value as Record<string, unknown>;
-  if (typeof r.output !== "string" || r.output.trim().length === 0) return false;
-  if (!(r.threadId === null || typeof r.threadId === "string")) return false;
-  // usage must be null or a plain object of safe non-negative integer counts.
-  if (r.usage !== null && r.usage !== undefined) {
-    if (typeof r.usage !== "object") return false;
-    const u = r.usage as Record<string, unknown>;
-    if (
-      !isSafeTokenCount(u.inputTokens) ||
-      !isSafeTokenCount(u.cachedInputTokens) ||
-      !isSafeTokenCount(u.outputTokens)
-    ) {
-      return false;
+const USAGE_KEYS = ["inputTokens", "cachedInputTokens", "outputTokens"] as const;
+
+/**
+ * Validate a Runner result and return a FRESH whitelisted object (never the
+ * Runner's original), so a hostile getter, extra field, cycle, or non-plain
+ * usage cannot reach the store. Returns null when the result is invalid, which
+ * the caller treats as a failure (fail closed).
+ */
+function normalizeRunnerResult(value: unknown): RunnerResult | null {
+  if (!isPlainObject(value)) return null;
+  if (typeof value.output !== "string" || value.output.trim().length === 0) return null;
+  if (!(value.threadId === null || typeof value.threadId === "string")) return null;
+
+  let usage: RunnerResult["usage"] = null;
+  if (value.usage !== null && value.usage !== undefined) {
+    if (!isPlainObject(value.usage)) return null;
+    const clean: Record<string, number> = {};
+    for (const key of USAGE_KEYS) {
+      const v = value.usage[key];
+      if (v === undefined) continue;
+      if (!(typeof v === "number" && Number.isSafeInteger(v) && v >= 0)) return null;
+      clean[key] = v;
     }
+    usage = clean;
   }
-  return true;
+  return { output: value.output, threadId: value.threadId, usage };
 }
 
 
@@ -571,12 +581,16 @@ export class AgentService {
       // Await confirmation that every child/background task the runner spawned has
       // ended, so a post-return write cannot slip past reconciliation.
       await this.runner.settled?.(agentAtStart.id);
-      // Validate the runner result shape; a null / malformed result is a failure,
-      // never a silent completion.
-      if (!isValidResult(result)) {
+      // Validate + sanitize the runner result; a null / malformed / non-plain
+      // result is a failure, never a silent completion. The stored result is a
+      // fresh whitelisted object.
+      const normalized = normalizeRunnerResult(result);
+      if (!normalized) {
         hasError = true;
         runError = new Error("Runner returned an invalid or empty result");
         result = null;
+      } else {
+        result = normalized;
       }
     } catch (error) {
       hasError = true;
@@ -603,6 +617,18 @@ export class AgentService {
     const completedAt = now();
     const cancelled = runError instanceof RunCancelledError;
     let violation = runError instanceof WarrantViolationError ? runError : null;
+    // The monitor is authoritative: even if a Runner ignored observer.violation
+    // and returned normally, a blocked action means the run is blocked. Safety
+    // must not depend on the Runner cooperating.
+    if (!violation && monitor.violation) {
+      const decision = monitor.violation.decision;
+      violation = new WarrantViolationError(
+        decision.clause,
+        decision.reason,
+        describeAction(monitor.violation.action),
+        decision.subject,
+      );
+    }
 
     // Reconcile on EVERY terminal path (success, failure, cancel, timeout) to
     // gather complete evidence of any unauthorized on-disk change, including a
@@ -621,10 +647,12 @@ export class AgentService {
         recon.decision.subject,
       );
     }
-    // Structured evidence for EVERY outcome (finding 20).
+    // Structured evidence for EVERY finalized outcome (findings 8/20).
     const diagnostics: RunDiagnostics = {
+      reconciliationStatus: recon.unverifiable ? "unverifiable" : "verified",
+      reconciliationError: recon.unverifiable ? recon.decision.reason : null,
       changedPaths: recon.changed,
-      reportedPaths: [...monitor.reportedPaths].map(canonicalizePath).sort(),
+      reportedPaths: [...new Set([...monitor.reportedPaths].map(canonicalizePath))].sort(),
       outOfBandPaths: recon.outOfBand,
       strayPaths: recon.stray,
       reportedWriteCount: monitor.consumption.fileWrites,
@@ -703,8 +731,9 @@ export class AgentService {
             agent.status = "error";
             agent.quarantined = true;
             agent.quarantineReason =
-              (recoveryError ? "Recovery failed: " + recoveryError + ". " : "") +
-              (message ?? "Workspace recovery failed");
+              recoveryError
+                ? "Recovery failed: " + recoveryError
+                : (message ?? "Workspace recovery failed");
             agent.lastError = agent.quarantineReason;
           } else if (agent.status !== "stopped") {
             agent.status = hasError && !cancelled && !violation ? "error" : "ready";
@@ -744,6 +773,7 @@ export class AgentService {
     if (outcome === "completed") return null;
     if (outcome === "blocked" && containment) {
       const parts = [
+        runError !== undefined ? "runner: " + safeErrorMessage(runError) : null,
         "Blocked by " + containment.clause,
         containment.protectedAsset ? "path " + containment.protectedAsset : null,
         containment.recoveryFailed
@@ -887,6 +917,7 @@ export class AgentService {
     stray: string[];
     outOfBand: string[];
     symlinkEscape: boolean;
+    unverifiable: boolean;
   }> {
     const reported = new Set([...reportedPaths].map(canonicalizePath));
     const base = {
@@ -909,6 +940,7 @@ export class AgentService {
         verdict: "block",
         ...base,
         symlinkEscape: true,
+        unverifiable: false,
       };
     }
 
@@ -920,12 +952,13 @@ export class AgentService {
         decision: {
           verdict: "block",
           clause: "scope.writePaths",
-          reason: "The workspace could not be verified after the run",
+          reason: "The workspace could not be verified after the run (I/O error)",
           subject: null,
         },
         verdict: "block",
         ...base,
         symlinkEscape: false,
+        unverifiable: true,
       };
     }
 
@@ -947,6 +980,7 @@ export class AgentService {
         verdict: "block",
         ...rich,
         symlinkEscape: false,
+        unverifiable: false,
       };
     }
 
@@ -963,18 +997,21 @@ export class AgentService {
           verdict: "block",
           clause: "scope.maxFileWrites",
           reason:
-            consumed +
-            " write operations (>= reported " +
+            "changed-path budget exceeded: reported " +
             reportedWriteCount +
             " + " +
             outOfBand.length +
-            " unreported) exceed the warranted budget of " +
-            warrant.scope.maxFileWrites,
+            " unreported changed-path unit(s) = " +
+            consumed +
+            " > " +
+            warrant.scope.maxFileWrites +
+            " (a rename counts as its 2 net path changes; see SECURITY_MODEL.md)",
           subject: outOfBand[0] ?? null,
         },
         verdict: "block",
         ...rich,
         symlinkEscape: false,
+        unverifiable: false,
       };
     }
 
@@ -985,6 +1022,7 @@ export class AgentService {
       verdict: "allow",
       ...rich,
       symlinkEscape: false,
+      unverifiable: false,
     };
   }
 

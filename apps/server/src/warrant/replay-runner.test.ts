@@ -270,3 +270,29 @@ describe("ReplayRunner __write default-reject (F12)", () => {
     expect(await readFile(path.join(ws, "tests", "ok.ts"), "utf8")).toBe("x");
   });
 });
+
+describe("ReplayRunner duplicate write + consistent relativization (R6)", () => {
+  it("R6-3: two __write on the same itemId/path are rejected (no budget bypass)", async () => {
+    const ws = await workspace(false);
+    const file = await singleScenario(ws, [
+      { __write: { path: "tests/a.ts", content: "first" }, type: "item.started", item: { id: "f1", type: "file_change", changes: [{ path: "tests/a.ts" }] } },
+      { __write: { path: "tests/a.ts", content: "second" }, type: "item.completed", item: { id: "f1", type: "file_change", changes: [{ path: "tests/a.ts" }] } },
+    ]);
+    roots.push(file);
+    await expect(
+      new ReplayRunner(file).run(req(ws, TASK, new ConformanceMonitor({ ...warrant(), scope: { ...warrant().scope, writePaths: ["**"] } }, "r1", [ws]))),
+    ).rejects.toThrow(/duplicate physical write/);
+  });
+
+  it("R6-4: an absolute in-workspace __write path matches an absolute reported path", async () => {
+    const ws = await workspace(false);
+    const abs = path.join(ws, "tests", "a.ts");
+    const file = await singleScenario(ws, [
+      { __write: { path: abs, content: "x" }, type: "item.completed", item: { id: "f1", type: "file_change", changes: [{ path: abs }] } },
+    ]);
+    roots.push(file);
+    const monitor = new ConformanceMonitor({ ...warrant(), scope: { ...warrant().scope, writePaths: ["**"] } }, "r1", [ws]);
+    await new ReplayRunner(file).run(req(ws, TASK, monitor));
+    expect(await readFile(abs, "utf8")).toBe("x");
+  });
+});

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describeAction, extractItem, itemToAction } from "./events.js";
 import { applyUsage, evaluateAction } from "./policy.js";
+import { canonicalizePath } from "./glob.js";
 import {
   emptyUsage,
   type AgentAction,
@@ -75,8 +76,19 @@ export class ConformanceMonitor implements RunObserver {
     if (!action) return;
 
     if (action.kind === "file_change") {
+      // Canonicalize and de-duplicate BEFORE counting so tests/a.ts and
+      // tests/./a.ts (or a path repeated within one event) are one write.
+      const canonical: string[] = [];
+      const local = new Set<string>();
+      for (const raw of action.paths) {
+        const key = canonicalizePath(raw);
+        if (!local.has(key)) {
+          local.add(key);
+          canonical.push(key);
+        }
+      }
       const seen = this.evaluatedPaths.get(action.itemId) ?? new Set<string>();
-      const fresh = action.paths.filter((path) => !seen.has(path));
+      const fresh = canonical.filter((path) => !seen.has(path));
       if (fresh.length === 0) return;
       for (const path of fresh) seen.add(path);
       this.evaluatedPaths.set(action.itemId, seen);

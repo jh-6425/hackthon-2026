@@ -110,6 +110,8 @@ export interface AgentRun {
   warrantId: string | null;
   containment: RunContainment | null;
   diagnostics: {
+    reconciliationStatus: "verified" | "unverifiable";
+    reconciliationError: string | null;
     changedPaths: string[];
     reportedPaths: string[];
     outOfBandPaths: string[];

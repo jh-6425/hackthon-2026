@@ -97,7 +97,11 @@ export interface RunnerRequest {
   observer?: RunObserver | undefined;
 }
 
+export type ReconciliationStatus = "verified" | "unverifiable";
+
 export interface RunDiagnostics {
+  reconciliationStatus: ReconciliationStatus;
+  reconciliationError: string | null;
   changedPaths: string[];
   reportedPaths: string[];
   outOfBandPaths: string[];
