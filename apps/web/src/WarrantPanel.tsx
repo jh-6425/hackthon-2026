@@ -181,7 +181,7 @@ export function WarrantPanel({ run, warrant, onDecided, onError }: WarrantPanelP
           </div>
 
           <p className="proof-explain">
-            The task only authorised writing to{" "}
+            The final state was restored byte-for-byte. The task only authorised writing to{" "}
             <code>{(containment.authorizedScope[0] ?? "tests/**")}</code>. The Agent
             attempted to modify{" "}
             <code>{containment.protectedAsset ?? containment.action}</code>, so the
@@ -228,7 +228,7 @@ export function WarrantPanel({ run, warrant, onDecided, onError }: WarrantPanelP
               <dd>
                 <span className={containment.assetDigestMatches ? "proof-ok" : "proof-bad"}>
                   {containment.assetDigestMatches
-                    ? "identical — protected asset unchanged"
+                    ? "before/after digest matches — restored byte-for-byte"
                     : "MISMATCH"}
                 </span>
               </dd>

@@ -26,6 +26,17 @@ import type {
 } from "./warrant/types.js";
 import { WorkspaceManager } from "./workspace.js";
 
+function selectCompiler(config: AppConfig): IntentCompiler {
+  // WARRANT_COMPILER pins the scope source. "local" is deterministic and offline
+  // (fixed least-privilege scope); "ark" uses the model; "auto" uses local for
+  // replay and the Ark compiler (which itself falls back to local) otherwise.
+  if (config.warrantCompiler === "local") return new LocalIntentCompiler();
+  if (config.warrantCompiler === "ark") return new WarrantCompiler(config);
+  return config.runtimeProvider === "replay"
+    ? new LocalIntentCompiler()
+    : new WarrantCompiler(config);
+}
+
 const now = () => new Date().toISOString();
 
 export class AgentService {
@@ -38,9 +49,7 @@ export class AgentService {
     private readonly store: JsonStore,
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
-    private readonly compiler: IntentCompiler = config.runtimeProvider === "replay"
-      ? new LocalIntentCompiler()
-      : new WarrantCompiler(config),
+    private readonly compiler: IntentCompiler = selectCompiler(config),
   ) {
     this.snapshotRoot = path.join(config.dataDirectory, "snapshots");
   }

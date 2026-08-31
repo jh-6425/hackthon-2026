@@ -5,6 +5,9 @@ Kit for TikTok TechJam 2026 — Track C: Kill Switch.
 
 ## The middleware in one diagram
 
+> One-page export: [`WARRANT_ARCHITECTURE.svg`](WARRANT_ARCHITECTURE.svg)
+
+
 ```mermaid
 flowchart LR
     subgraph trusted["TRUSTED CONTROL PLANE"]

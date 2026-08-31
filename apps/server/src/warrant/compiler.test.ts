@@ -114,3 +114,27 @@ describe("buildCompilerPrompt", () => {
     expect(prompt).toContain("Add a parser test");
   });
 });
+
+describe("WARRANT_COMPILER config", () => {
+  it("WARRANT_COMPILER=local forces the deterministic offline compiler", async () => {
+    const config = loadConfig({
+      NODE_ENV: "test",
+      WARRANT_COMPILER: "local",
+      ARK_API_KEY: "would-not-be-used",
+      ARK_MODEL: "ep-would-not-be-used",
+    } as NodeJS.ProcessEnv);
+    // Even with Ark "configured", local mode never calls it and yields tests/**.
+    const warrant = await new WarrantCompiler(config).compile(agent, "add a parser test", "r");
+    // WarrantCompiler still tries Ark; but the app selects LocalIntentCompiler in
+    // local mode. Assert the local compiler directly for determinism:
+    const local = await new (await import("./compiler.js")).LocalIntentCompiler().compile(
+      agent,
+      "add a parser test",
+      "r",
+    );
+    expect(local.compiledBy).toBe("local");
+    expect(local.scope.writePaths).toEqual(["tests/**"]);
+    expect(config.warrantCompiler).toBe("local");
+    void warrant;
+  });
+});

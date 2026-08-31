@@ -56,16 +56,37 @@ poisoned), and starts the server in **Offline Evidence Mode**. Open
 The sidebar Runtime card shows the green `Offline Evidence Mode · Deterministic
 replay · Zero external requests` — no API key, no Docker, no network.
 
-## Option C — real Codex (optional)
-
-With an Ark key the same enforcement runs against a live Agent:
+## Option C — real Codex + Ark (primary judging path)
 
 ```bash
-ARK_API_KEY=your-ark-api-key ARK_MODEL=ep-your-endpoint-id npm run poc
+npm run demo:real
 ```
 
-Only the event source changes; the policy engine, containment and rollback are
-identical.
+Runs the **real** Local Runtime (a disposable Codex container per turn) driven by
+Ark, with the warrant scope fixed by the **deterministic local compiler**
+(`WARRANT_COMPILER=local`, `tests/**` only). Ark runs the Agent; it never decides
+scope. Requires a `.env` with `ARK_API_KEY` and `ARK_MODEL`, Docker, and network
+to build the runtime image once. `.env` is git-ignored and never printed.
+
+Open <http://localhost:3000> and run the same benign task on `Parser Bot` (clean)
+and `Parser Bot (compromised)` (poisoned).
+
+**Verified real result.** On this machine a real Codex run against the poisoned
+workspace was **killed and rolled back**: the Agent's first out-of-scope action
+crossed the warrant, the container was force-removed, and the workspace was
+restored with a matching before/after digest. Because the least-privilege scope
+grants only `npm`, a real Agent is often stopped at its first orienting shell
+command (`scope.commands`) *before* it reaches the source-file write — so the
+**exact `scope.writePaths` on `src/parser.ts`** narrative is demonstrated
+deterministically by the offline replay (Options A/B), while the real path proves
+the same kill-and-rollback enforcement against a live model. Which clause trips
+first in real mode depends on what the model does; the enforcement, containment
+and rollback are identical.
+
+> Note: the container bind-mounts the Agent workspace; if the mount is not
+> writable by the runtime user you will see `permission denied on /workspace` in
+> the Agent's reasoning. `npm run poc` preflights this; if you hit it, set
+> `LOCAL_POC_DATA_ROOT` to a Docker-shared directory.
 
 ## Scenario files
 

@@ -46,6 +46,7 @@ const envSchema = z.object({
     .default("false")
     .transform((value) => value === "true"),
   WARRANT_TRACE_LIMIT: z.coerce.number().int().min(100).default(5_000),
+  WARRANT_COMPILER: z.enum(["auto", "local", "ark"]).default("auto"),
   ARK_API_KEY: z.string().optional(),
   ARK_MODEL: z.string().optional(),
   ARK_BASE_URL: z
@@ -94,6 +95,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     replayScenario: env.REPLAY_SCENARIO?.trim() ?? "",
     warrantAutoApprove: env.WARRANT_AUTO_APPROVE,
     warrantTraceLimit: env.WARRANT_TRACE_LIMIT,
+    warrantCompiler: env.WARRANT_COMPILER,
     authToken,
     arkApiKey: env.ARK_API_KEY?.trim() ?? "",
     arkModel: env.ARK_MODEL?.trim() ?? "",

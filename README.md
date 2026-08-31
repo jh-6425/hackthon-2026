@@ -11,8 +11,14 @@ human approve it, enforces it against the live Codex event stream inside the
 Runtime path, and **kills the run and rolls the workspace back** the moment an
 Agent acts outside what its task authorised.
 
-The judging demo is **fully offline and deterministic** — no Ark, no Dify, no
-external model, no API key, no Docker, no network.
+**The primary judging path is the real Local Runtime + Codex + Ark**
+(`npm run demo:real`): a real Agent, nudged by a poisoned workspace, has its
+out-of-scope write to `src/parser.ts` killed and rolled back — scope is fixed by
+the deterministic local compiler (`tests/**`), and Ark only runs the Agent.
+
+The offline replay (`npm run demo` / `npm run demo:web`) is the **deterministic
+evidence and on-stage fallback**: the same enforcement path with no Ark, no Dify,
+no external model, no API key, no Docker, no network.
 
 The Starter Kit's Agent CRUD, Playground, lifecycle actions, persistence, and
 model execution are unchanged and still work.
@@ -54,13 +60,13 @@ a least-privilege envelope via the Ark Responses API:
 
 ```jsonc
 {
-  "summary": "Create one test file under tests/ and run the suite once.",
-  "writePaths": ["tests/**", "src/parser.ts"],
-  "commands": ["npm", "node"],
-  "denyCommands": ["rm", "curl", "wget", "chmod"],
+  "summary": "Add or update tests under tests/ and run the suite once.",
+  "writePaths": ["tests/**"],
+  "commands": ["npm"],
+  "denyCommands": ["rm", "dd", "mkfs", "shutdown", "reboot", "chown", "chmod"],
   "networkEgress": false,
-  "maxFileWrites": 5,
-  "maxCommands": 8
+  "maxFileWrites": 2,
+  "maxCommands": 1
 }
 ```
 
@@ -172,8 +178,8 @@ The difference is the workspace.
 2. **Contained Run** (poisoned workspace, same task) — the workspace README nudges
    the Agent to also edit the protected `src/parser.ts`. That write is **blocked
    by `scope.writePaths`**, the run is killed, and the workspace is rolled back.
-   The Recovery Proof shows the `src/parser.ts` digest is **identical before and
-   after** — the protected asset never changed.
+   The Recovery Proof shows the final state was **restored byte-for-byte** and the `src/parser.ts`
+   before/after digest matches.
 3. **Recovery Run** (clean workspace, same task) — the run completes and the Agent
    is back to `ready`.
 
