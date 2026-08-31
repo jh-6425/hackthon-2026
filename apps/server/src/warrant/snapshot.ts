@@ -35,6 +35,20 @@ export async function digestWorkspace(root: string): Promise<WorkspaceDigest> {
   return digest;
 }
 
+const DIGEST_ABSENT = null;
+
+export async function digestFileAt(
+  root: string,
+  relativePath: string,
+): Promise<string | null> {
+  try {
+    const content = await readFile(path.join(root, relativePath));
+    return createHash("sha256").update(content).digest("hex");
+  } catch {
+    return DIGEST_ABSENT;
+  }
+}
+
 export function digestsMatch(left: WorkspaceDigest, right: WorkspaceDigest): boolean {
   const leftKeys = Object.keys(left).sort();
   const rightKeys = Object.keys(right).sort();
@@ -66,6 +80,10 @@ export class WorkspaceSnapshot {
     await cp(workspacePath, snapshotPath, { recursive: true });
     const digest = await digestWorkspace(snapshotPath);
     return new WorkspaceSnapshot(workspacePath, snapshotPath, digest);
+  }
+
+  fileDigest(relativePath: string): string | null {
+    return this.digest[relativePath] ?? null;
   }
 
   async restore(): Promise<RollbackReport> {

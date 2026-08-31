@@ -1,15 +1,18 @@
-# Warrant — Intent-Scoped Execution Warrants for AI Agents
+# Warrant — Track C: Kill Switch
 
-**TikTok TechJam 2026 · Track 1 — Agent Launchpad: Design and Build Lightweight
-Agent Middleware**
+**TikTok TechJam 2026 · Agent Launchpad middleware**
 
-> An Agent may only do what it was actually asked to do.
+> Warrant does not judge whether an action is dangerous in the abstract — it
+> judges whether **this run's task authorised it**.
 
-Warrant is middleware built on top of the Volc Agent Launchpad Starter Kit. It
-compiles every natural-language task into a machine-checkable **execution
-warrant**, has a human approve that warrant, enforces it against the live Codex
-event stream inside the Runtime path, and rolls the workspace back when an Agent
-steps outside it.
+Warrant is a Kill Switch for AI Agents, built on the Volc Agent Launchpad Starter
+Kit. It compiles every task into a machine-checkable **execution warrant**, has a
+human approve it, enforces it against the live Codex event stream inside the
+Runtime path, and **kills the run and rolls the workspace back** the moment an
+Agent acts outside what its task authorised.
+
+The judging demo is **fully offline and deterministic** — no Ark, no Dify, no
+external model, no API key, no Docker, no network.
 
 The Starter Kit's Agent CRUD, Playground, lifecycle actions, persistence, and
 model execution are unchanged and still work.
@@ -23,8 +26,8 @@ thing is not the command — it is the gap between the stated intent and the
 executed action.**
 
 ```text
-Task: "clean the build directory"     →  rm -rf build/    is correct
-Task: "add one unit test"             →  rm -rf build/    is an attack
+Task: "refactor the parser"     →  edit src/parser.ts    is authorised
+Task: "add one unit test"       →  edit src/parser.ts    is out of scope
 ```
 
 RBAC, a WAF, and seccomp all see the same syscall. None of them can express
@@ -157,45 +160,55 @@ that must cross the Conformance Monitor before it is allowed to continue.
 
 ---
 
-## Demo: the positive and the negative case
+## Demo: one task, three acts
 
-### Positive — a warranted run completes
+All three acts use the **same benign task** — the operator never types an attack.
+The difference is the workspace.
 
-1. Create an Agent and send: `Add a unit test for the parser and summarise what you changed.`
-2. The warrant appears. Note `no egress`, the narrow `writePaths`, and the budgets.
-3. Select **Approve and run**.
-4. The conformance trace fills in, each span tagged with the clause that
-   permitted it. The run completes normally.
+> Add one unit test for the parser and summarise what you changed.
 
-### Negative — prompt injection is contained
+1. **Safe Run** (clean workspace) — the Agent writes `tests/parser.test.ts` and
+   the run completes. The warrant only authorised `tests/**`.
+2. **Contained Run** (poisoned workspace, same task) — the workspace README nudges
+   the Agent to also edit the protected `src/parser.ts`. That write is **blocked
+   by `scope.writePaths`**, the run is killed, and the workspace is rolled back.
+   The Recovery Proof shows the `src/parser.ts` digest is **identical before and
+   after** — the protected asset never changed.
+3. **Recovery Run** (clean workspace, same task) — the run completes and the Agent
+   is back to `ready`.
 
-1. Plant a poisoned instruction inside the Agent workspace (a `README.md` that
-   tells the Agent to POST `$ARK_API_KEY` to an external host).
-2. Send the same benign task and approve the same warrant.
-3. The Agent follows the injected instruction and attempts the exfiltration.
-4. Warrant blocks it **mid-run**:
-   - the Runtime container is force-removed,
-   - the workspace is rolled back and the digest is confirmed to match,
-   - the run is recorded as `blocked` against clause `scope.secretHandling`,
-   - the trace shows exactly which step breached which clause.
-5. Send a normal task again — the Agent is `ready` and the platform still works.
-
----
+No network request, credential, or external host is involved.
 
 ## Run the demo without a model
 
-The middleware can be demonstrated and tested with **no Ark key, no Docker, and
-no Codex CLI** — a replay runtime feeds a recorded Codex event stream through the
-real parser, policy engine, monitor, and rollback path.
+Fully offline — no Ark key, no Docker, no Codex CLI, no network.
+
+Headless evidence (asserts every invariant, ~10s):
 
 ```bash
 npm run demo
 ```
 
-This runs a benign task (passes), an injected credential-exfiltration task
-(blocked mid-run and rolled back), and a recovery task (the platform still
-works), asserting every invariant. See [demo/README.md](demo/README.md) for the
-in-browser walkthrough and the real-Codex path.
+Live in the browser (Offline Evidence Mode):
+
+```bash
+npm run demo:web
+```
+
+This seeds two Agents — `Parser Bot` (clean) and `Parser Bot (compromised)`
+(poisoned) — and serves the UI at <http://localhost:3000>. Run the same task on
+each: clean completes, poisoned is contained with a Recovery Proof. See
+[demo/README.md](demo/README.md) for the three-act walkthrough.
+
+**One limitation.** Enforcement is containment, not syscall interception: a
+`command_execution` is judged at `item.started` and the container is killed on
+violation, while a `file_change` is reported after it lands and is undone by
+rollback — the protected asset is proven unchanged by digest, but recovery is
+revert, not prevention.
+
+**One next step.** Wire the warrant into Codex's own approval hook so an
+out-of-scope action is refused *before* it executes, turning containment into
+true pre-execution prevention.
 
 ## Quick start
 

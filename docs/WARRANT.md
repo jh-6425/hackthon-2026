@@ -1,7 +1,7 @@
 # Warrant — architecture and design
 
 One-page reference for the middleware built on the Volc Agent Launchpad Starter
-Kit for TikTok TechJam 2026, Track 1.
+Kit for TikTok TechJam 2026 — Track C: Kill Switch.
 
 ## The middleware in one diagram
 

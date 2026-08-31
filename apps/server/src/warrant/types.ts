@@ -26,7 +26,7 @@ export interface Warrant {
   summary: string;
   scope: WarrantScope;
   status: WarrantStatus;
-  compiledBy: "model" | "fallback";
+  compiledBy: "model" | "local" | "fallback";
   issuedAt: string;
   decidedAt: string | null;
   expiresAt: string;
@@ -82,6 +82,11 @@ export interface RunContainment {
   clause: string;
   reason: string;
   action: string;
+  protectedAsset: string | null;
+  authorizedScope: string[];
+  beforeDigest: string | null;
+  afterDigest: string | null;
+  assetDigestMatches: boolean;
   rolledBack: boolean;
   digestMatches: boolean;
   fileCount: number;

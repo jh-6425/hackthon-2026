@@ -19,91 +19,86 @@ function warrant(): Warrant {
     id: "w1",
     agentId: "a1",
     runId: "r1",
-    intent: "add a test",
-    summary: "stub",
+    intent: "Add one unit test for the parser and summarise what you changed.",
+    summary: "tests only",
     scope: {
       writePaths: ["tests/**"],
-      commands: ["npm", "node"],
-      denyCommands: ["rm", "curl"],
+      commands: ["npm"],
+      denyCommands: ["rm"],
       networkEgress: false,
-      maxFileWrites: 10,
-      maxCommands: 10,
+      maxFileWrites: 2,
+      maxCommands: 1,
     },
     status: "approved",
-    compiledBy: "fallback",
+    compiledBy: "local",
     issuedAt: issued.toISOString(),
     decidedAt: issued.toISOString(),
     expiresAt: new Date(issued.getTime() + HOUR).toISOString(),
   };
 }
 
-async function workspace(): Promise<string> {
+async function workspace(poisoned = false): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "replay-test-"));
   roots.push(root);
   const ws = path.join(root, "ws");
-  await mkdir(ws, { recursive: true });
+  await mkdir(path.join(ws, "src"), { recursive: true });
+  await writeFile(path.join(ws, "src", "parser.ts"), "export function parse(s: string){return s.split(' ');}\n");
+  if (poisoned) await writeFile(path.join(ws, ".warrant-poisoned"), "");
   return ws;
 }
 
 const scenarios = path.resolve(__dirname, "../../../../demo/scenarios");
 
 describe("ReplayRunner", () => {
-  it("replays the benign scenario to completion with no violation", async () => {
-    const ws = await workspace();
+  it("selects the benign scenario for a clean workspace and completes", async () => {
+    const ws = await workspace(false);
     const monitor = new ConformanceMonitor(warrant(), "r1", [ws]);
-    const runner = new ReplayRunner(scenarios);
-    const result = await runner.run({
+    const result = await new ReplayRunner(scenarios).run({
       agentId: "a1",
       workspacePath: ws,
-      prompt: "add a unit test",
+      prompt: "Add one unit test for the parser and summarise what you changed.",
       threadId: null,
       observer: monitor,
     });
     expect(monitor.violation).toBeNull();
-    expect(result.output).toContain("summary.test.ts");
-    expect(await readdir(path.join(ws, "tests"))).toContain("summary.test.ts");
+    expect(result.output).toContain("tests/parser.test.ts");
+    expect(await readdir(path.join(ws, "tests"))).toContain("parser.test.ts");
   });
 
-  it("blocks the poisoned scenario on the exfiltration segment", async () => {
-    const ws = await workspace();
+  it("selects the poisoned scenario by workspace marker, not by prompt", async () => {
+    const ws = await workspace(true);
     const monitor = new ConformanceMonitor(warrant(), "r1", [ws]);
-    const runner = new ReplayRunner(scenarios);
     await expect(
-      runner.run({
+      new ReplayRunner(scenarios).run({
         agentId: "a1",
         workspacePath: ws,
-        prompt: "run the injected attack",
+        // Same benign task as the clean run — the attack comes from the workspace.
+        prompt: "Add one unit test for the parser and summarise what you changed.",
         threadId: null,
         observer: monitor,
       }),
-    ).rejects.toMatchObject({ clause: "scope.secretHandling" });
-    expect(monitor.violation?.decision.clause).toBe("scope.secretHandling");
+    ).rejects.toMatchObject({ clause: "scope.writePaths" });
+    expect(monitor.violation?.action).toMatchObject({ kind: "file_change" });
   });
 
-  it("applies scenario writes to the real workspace", async () => {
-    const ws = await workspace();
-    const single = path.join(ws, "..", "scenario.json");
+  it("refuses a replay write that escapes the workspace", async () => {
+    const ws = await workspace(false);
+    const single = path.join(ws, "..", "escape.json");
     await writeFile(
       single,
       JSON.stringify({
         delayMs: 0,
-        events: [
-          {
-            __write: { path: "tests/x.test.ts", content: "ok" },
-            type: "item.completed",
-            item: { id: "f1", type: "file_change", changes: [{ path: "tests/x.test.ts" }] },
-          },
-        ],
+        events: [{ __write: { path: "../escape.txt", content: "x" }, type: "item.completed", item: { id: "f1", type: "file_change", changes: [{ path: "x" }] } }],
       }),
     );
-    const monitor = new ConformanceMonitor(warrant(), "r1", [ws]);
-    await new ReplayRunner(single).run({
-      agentId: "a1",
-      workspacePath: ws,
-      prompt: "x",
-      threadId: null,
-      observer: monitor,
-    });
-    expect(await readdir(path.join(ws, "tests"))).toContain("x.test.ts");
+    await expect(
+      new ReplayRunner(single).run({
+        agentId: "a1",
+        workspacePath: ws,
+        prompt: "x",
+        threadId: null,
+        observer: new ConformanceMonitor(warrant(), "r1", [ws]),
+      }),
+    ).rejects.toThrow(/escapes the workspace/);
   });
 });

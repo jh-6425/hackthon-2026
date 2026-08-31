@@ -18,7 +18,9 @@
     "check": "npm run typecheck && npm run test && npm run build",
     "poc": "./scripts/start-local-poc.sh",
     "start": "npm run start -w @launchpad/server",
-    "demo": "npm run build -w @launchpad/server && node demo/warrant-demo.mjs"
+    "demo": "npm run build -w @launchpad/server && node demo/warrant-demo.mjs",
+    "demo:seed": "node demo/seed-browser.mjs .demo-data .demo-workspaces",
+    "demo:web": "npm run build && npm run demo:seed && RUNTIME_PROVIDER=replay REPLAY_SCENARIO=\"$PWD/demo/scenarios\" NODE_ENV=production HOST=127.0.0.1 PORT=3000 APP_DATA_DIR=\"$PWD/.demo-data\" AGENT_WORKSPACE_ROOT=\"$PWD/.demo-workspaces\" CODEX_HOME=\"$PWD/.demo-codex\" WARRANT_AUTO_APPROVE=false npm start"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",

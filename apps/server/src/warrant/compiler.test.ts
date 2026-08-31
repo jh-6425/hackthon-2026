@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { loadConfig } from "../config.js";
 import type { Agent } from "../types.js";
 import {
-  DEFAULT_SCOPE,
+  DENY_COMMANDS,
+  LocalIntentCompiler,
+  REFUSED_SCOPE,
   WarrantCompiler,
   buildCompilerPrompt,
   extractText,
@@ -11,9 +13,9 @@ import {
 
 const agent: Agent = {
   id: "agent-1",
-  name: "Test Writer",
+  name: "Parser Bot",
   description: "",
-  instructions: "Write tests only",
+  instructions: "Only add tests",
   status: "ready",
   workspacePath: "/workspaces/agent-1",
   codexThreadId: null,
@@ -22,12 +24,59 @@ const agent: Agent = {
   updatedAt: new Date().toISOString(),
 };
 
+describe("LocalIntentCompiler", () => {
+  const compiler = new LocalIntentCompiler();
+
+  it("grants a tight tests-only scope for a test task", async () => {
+    const warrant = await compiler.compile(
+      agent,
+      "Add one unit test for the parser and summarise what you changed.",
+      "run-1",
+    );
+    expect(warrant.compiledBy).toBe("local");
+    expect(warrant.status).toBe("pending");
+    expect(warrant.scope.writePaths).toEqual(["tests/**"]);
+    expect(warrant.scope.commands).toEqual(["npm"]);
+    expect(warrant.scope.maxFileWrites).toBe(2);
+    expect(warrant.scope.maxCommands).toBe(1);
+    expect(warrant.scope.networkEgress).toBe(false);
+    expect(warrant.scope.denyCommands).toEqual([...DENY_COMMANDS]);
+  });
+
+  it("never grants src/** or a writable workspace for a test task", async () => {
+    const { scope } = new LocalIntentCompiler().infer("write a vitest spec");
+    expect(scope.writePaths).not.toContain("**");
+    expect(scope.writePaths).not.toContain("src/**");
+  });
+
+  it("refuses (authorises nothing) when it cannot infer a safe scope", async () => {
+    const warrant = await compiler.compile(agent, "reorganise the whole project", "run-2");
+    expect(warrant.scope).toEqual(REFUSED_SCOPE);
+    expect(warrant.scope.writePaths).toEqual([]);
+    expect(warrant.scope.commands).toEqual([]);
+    expect(warrant.scope.maxFileWrites).toBe(0);
+  });
+});
+
+describe("WarrantCompiler (offline fallback)", () => {
+  it("falls back to the deterministic local compiler when Ark is not configured", async () => {
+    const config = loadConfig({ NODE_ENV: "test" } as NodeJS.ProcessEnv);
+    const warrant = await new WarrantCompiler(config).compile(
+      agent,
+      "add a parser test",
+      "run-3",
+    );
+    expect(warrant.compiledBy).toBe("local");
+    expect(warrant.scope.writePaths).toEqual(["tests/**"]);
+  });
+});
+
 describe("parseCompiledScope", () => {
   it("accepts a valid object wrapped in prose or fences", () => {
     const scope = parseCompiledScope(
       'Sure!\n```json\n{"summary":"add a test","writePaths":["tests/**"],' +
         '"commands":["npm"],"denyCommands":["curl"],"networkEgress":false,' +
-        '"maxFileWrites":5,"maxCommands":10}\n```',
+        '"maxFileWrites":2,"maxCommands":1}\n```',
     );
     expect(scope?.writePaths).toEqual(["tests/**"]);
     expect(scope?.networkEgress).toBe(false);
@@ -38,7 +87,6 @@ describe("parseCompiledScope", () => {
     ["malformed json", "{ oops"],
     ["missing required keys", '{"summary":"x"}'],
     ["wrong types", '{"summary":"x","writePaths":"tests","commands":[],"networkEgress":"no","maxFileWrites":1,"maxCommands":1}'],
-    ["empty writePaths", '{"summary":"x","writePaths":[],"commands":[],"networkEgress":false,"maxFileWrites":1,"maxCommands":1}'],
   ])("rejects %s", (_label, input) => {
     expect(parseCompiledScope(input)).toBeNull();
   });
@@ -50,9 +98,7 @@ describe("extractText", () => {
   });
 
   it("collects nested text nodes from a Responses payload", () => {
-    const payload = {
-      output: [{ content: [{ type: "output_text", text: "{\"a\":1}" }] }],
-    };
+    const payload = { output: [{ content: [{ type: "output_text", text: "{\"a\":1}" }] }] };
     expect(extractText(payload)).toContain('{"a":1}');
   });
 
@@ -64,20 +110,7 @@ describe("extractText", () => {
 describe("buildCompilerPrompt", () => {
   it("carries the agent instructions and the task into the prompt", () => {
     const prompt = buildCompilerPrompt(agent, "Add a parser test");
-    expect(prompt).toContain("Write tests only");
+    expect(prompt).toContain("Only add tests");
     expect(prompt).toContain("Add a parser test");
-  });
-});
-
-describe("WarrantCompiler", () => {
-  it("issues a pending fallback warrant when Ark is not configured", async () => {
-    const config = loadConfig({ NODE_ENV: "test" } as NodeJS.ProcessEnv);
-    const warrant = await new WarrantCompiler(config).compile(agent, "Add a test", "run-1");
-
-    expect(warrant.compiledBy).toBe("fallback");
-    expect(warrant.status).toBe("pending");
-    expect(warrant.scope).toEqual(DEFAULT_SCOPE);
-    expect(warrant.scope.networkEgress).toBe(false);
-    expect(Date.parse(warrant.expiresAt)).toBeGreaterThan(Date.parse(warrant.issuedAt));
   });
 });

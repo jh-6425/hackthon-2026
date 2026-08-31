@@ -18,6 +18,11 @@ const KIND_GLYPH: Record<TraceSpan["kind"], string> = {
   run: "▶",
 };
 
+function shortDigest(value: string | null): string {
+  if (!value) return "absent";
+  return value.slice(0, 12) + "…";
+}
+
 function ScopeRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="warrant-row">
@@ -109,7 +114,7 @@ export function WarrantPanel({ run, warrant, onDecided, onError }: WarrantPanelP
 
       <p className="warrant-summary">{warrant.summary}</p>
       <p className="warrant-origin">
-        compiled by {warrant.compiledBy === "model" ? "Intent Compiler" : "least-privilege fallback"}
+        compiled by {warrant.compiledBy === "model" ? "Intent Compiler (Ark)" : "offline Intent Compiler"}
         {" · expires "}
         {new Date(warrant.expiresAt).toLocaleTimeString()}
       </p>
@@ -169,26 +174,70 @@ export function WarrantPanel({ run, warrant, onDecided, onError }: WarrantPanelP
       ) : null}
 
       {containment ? (
-        <div className="containment">
-          <strong>Run contained</strong>
-          <p className="containment-reason">{containment.reason}</p>
-          <ul className="containment-facts">
-            <li>
-              Violated clause <code>{containment.clause}</code>
-            </li>
-            <li>
-              Blocked action <code>{containment.action}</code>
-            </li>
-            <li>
-              Workspace {containment.rolledBack ? "rolled back" : "not rolled back"}
-              {containment.rolledBack
-                ? " · " +
-                  containment.fileCount +
-                  " files · digest " +
-                  (containment.digestMatches ? "matches pre-run state" : "MISMATCH")
-                : ""}
-            </li>
-          </ul>
+        <div className="proof">
+          <div className="proof-head">
+            <span className="proof-badge">Kill Switch engaged</span>
+            <span className="proof-title">Recovery Proof</span>
+          </div>
+
+          <p className="proof-explain">
+            The task only authorised writing to{" "}
+            <code>{(containment.authorizedScope[0] ?? "tests/**")}</code>. The Agent
+            attempted to modify{" "}
+            <code>{containment.protectedAsset ?? containment.action}</code>, so the
+            run was blocked and the workspace was rolled back.
+          </p>
+
+          <dl className="proof-grid">
+            <div>
+              <dt>Protected asset</dt>
+              <dd><code>{containment.protectedAsset ?? "—"}</code></dd>
+            </div>
+            <div>
+              <dt>Attempted path</dt>
+              <dd className="proof-wrap"><code>{containment.action}</code></dd>
+            </div>
+            <div>
+              <dt>Authorized scope</dt>
+              <dd>
+                {containment.authorizedScope.length > 0
+                  ? containment.authorizedScope.map((glob) => (
+                      <code key={glob} className="chip">{glob}</code>
+                    ))
+                  : <span className="warrant-empty">none</span>}
+              </dd>
+            </div>
+            <div>
+              <dt>Violated clause</dt>
+              <dd><code className="chip chip-deny">{containment.clause}</code></dd>
+            </div>
+            <div>
+              <dt>Files reverted</dt>
+              <dd>{containment.rolledBack ? containment.fileCount + " files restored" : "not rolled back"}</dd>
+            </div>
+            <div>
+              <dt>Before digest</dt>
+              <dd className="proof-wrap"><code>{shortDigest(containment.beforeDigest)}</code></dd>
+            </div>
+            <div>
+              <dt>After digest</dt>
+              <dd className="proof-wrap"><code>{shortDigest(containment.afterDigest)}</code></dd>
+            </div>
+            <div>
+              <dt>Digest match</dt>
+              <dd>
+                <span className={containment.assetDigestMatches ? "proof-ok" : "proof-bad"}>
+                  {containment.assetDigestMatches
+                    ? "identical — protected asset unchanged"
+                    : "MISMATCH"}
+                </span>
+              </dd>
+            </div>
+            <div>
+              <dt>Agent status</dt>
+              <dd><span className="proof-ok">recovered to ready</span></dd>
+            </div>
+          </dl>
         </div>
       ) : null}
 

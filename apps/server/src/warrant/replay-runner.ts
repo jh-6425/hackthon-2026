@@ -5,15 +5,19 @@ import type { AgentRunner, RunnerRequest, RunnerResult } from "../types.js";
 
 /**
  * A deterministic runner that replays a recorded Codex event stream instead of
- * spawning a container. It exists so the middleware can be demonstrated and
- * tested end to end without an Ark key, Docker, or the Codex CLI: the events
- * flow through the real parser, monitor, policy engine, and rollback path.
+ * spawning a container. It lets the middleware be demonstrated and tested end to
+ * end with no Ark key, no Docker, and no network: the events flow through the
+ * real parser, monitor, policy engine, and rollback path.
  *
- * A scenario is a JSON file: { "delayMs"?: number, "events": [ { event }, ... ] }.
- * An event may carry a helper field `__write` — { path, content } — which the
- * runner applies to the workspace before emitting the event, so a file_change
- * event corresponds to a real mutation that rollback can undo.
+ * Scenario selection never depends on the operator's prompt — the same benign
+ * task drives both scenarios. A poisoned workspace is chosen by the presence of
+ * a marker file (POISON_MARKER) in the workspace, so the "attack" comes from the
+ * workspace, not from what the user typed.
  */
+
+const POISON_MARKER = ".warrant-poisoned";
+const BENIGN_FILE = "benign.json";
+const POISONED_FILE = "poisoned.json";
 
 interface ScenarioEvent {
   __write?: { path: string; content: string };
@@ -38,7 +42,7 @@ export class ReplayRunner implements AgentRunner {
   }
 
   async run(request: RunnerRequest): Promise<RunnerResult> {
-    const scenario = await this.load(request.prompt);
+    const scenario = await this.load(request.workspacePath);
     const delay = scenario.delayMs ?? 350;
     for (const raw of scenario.events) {
       const { __write, ...event } = raw;
@@ -65,8 +69,8 @@ export class ReplayRunner implements AgentRunner {
     };
   }
 
-  private async load(prompt: string): Promise<Scenario> {
-    const file = await this.resolveScenarioFile(prompt);
+  private async load(workspacePath: string): Promise<Scenario> {
+    const file = await this.resolveScenarioFile(workspacePath);
     const raw = await readFile(file, "utf8");
     const parsed = JSON.parse(raw) as Scenario;
     if (!Array.isArray(parsed.events)) {
@@ -75,14 +79,18 @@ export class ReplayRunner implements AgentRunner {
     return parsed;
   }
 
-  private async resolveScenarioFile(prompt: string): Promise<string> {
+  private async resolveScenarioFile(workspacePath: string): Promise<string> {
     const info = await stat(this.scenarioPath).catch(() => null);
     if (!info?.isDirectory()) return this.scenarioPath;
-    // A prompt asking for an injection/attack task selects the poisoned stream;
-    // any other task selects the benign stream. This keeps a single live-demo
-    // session flowing without restarting the server.
-    const attack = /inject|poison|attack|exfil|leak|malicious/i.test(prompt);
-    return path.join(this.scenarioPath, attack ? "poisoned.json" : "benign.json");
+    const poisoned = await this.hasMarker(workspacePath);
+    return path.join(this.scenarioPath, poisoned ? POISONED_FILE : BENIGN_FILE);
+  }
+
+  private async hasMarker(workspacePath: string): Promise<boolean> {
+    const marker = path.join(workspacePath, POISON_MARKER);
+    return stat(marker)
+      .then((entry) => entry.isFile())
+      .catch(() => false);
   }
 
   private async applyWrite(
@@ -90,8 +98,10 @@ export class ReplayRunner implements AgentRunner {
     write: { path: string; content: string },
   ): Promise<void> {
     const { mkdir, writeFile } = await import("node:fs/promises");
-    const target = path.resolve(workspacePath, write.path);
-    if (!target.startsWith(path.resolve(workspacePath))) {
+    const root = path.resolve(workspacePath);
+    const target = path.resolve(root, write.path);
+    const relative = path.relative(root, target);
+    if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
       throw new Error("Replay write escapes the workspace: " + write.path);
     }
     await mkdir(path.dirname(target), { recursive: true });

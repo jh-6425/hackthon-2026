@@ -12,9 +12,13 @@ import type {
   Message,
   UpdateAgentInput,
 } from "./types.js";
-import { WarrantCompiler, type IntentCompiler } from "./warrant/compiler.js";
+import {
+  LocalIntentCompiler,
+  WarrantCompiler,
+  type IntentCompiler,
+} from "./warrant/compiler.js";
 import { ConformanceMonitor } from "./warrant/monitor.js";
-import { WorkspaceSnapshot } from "./warrant/snapshot.js";
+import { WorkspaceSnapshot, digestFileAt } from "./warrant/snapshot.js";
 import type {
   RunContainment,
   TraceSpan,
@@ -34,7 +38,9 @@ export class AgentService {
     private readonly store: JsonStore,
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
-    private readonly compiler: IntentCompiler = new WarrantCompiler(config),
+    private readonly compiler: IntentCompiler = config.runtimeProvider === "replay"
+      ? new LocalIntentCompiler()
+      : new WarrantCompiler(config),
   ) {
     this.snapshotRoot = path.join(config.dataDirectory, "snapshots");
   }
@@ -379,19 +385,22 @@ export class AgentService {
   }
 
   async systemInfo(): Promise<Record<string, unknown>> {
+    const replay = this.config.runtimeProvider === "replay";
     return {
-      arkConfigured: isArkConfigured(this.config),
+      offlineMode: replay,
+      arkConfigured: replay ? true : isArkConfigured(this.config),
       arkBaseUrl: this.config.arkBaseUrl,
       arkModel: this.config.arkModel || null,
-      codexAvailable: await this.runner.isAvailable(),
+      codexAvailable: replay ? true : await this.runner.isAvailable(),
       codexSandboxMode: this.config.codexSandboxMode,
       runtimeProvider: this.config.runtimeProvider,
       containerEngine:
         this.config.runtimeProvider === "container"
           ? this.config.containerEngine
           : null,
-      runtime:
-        this.config.runtimeProvider === "container"
+      runtime: replay
+        ? "Offline Evidence Mode · Deterministic replay · Zero external requests"
+        : this.config.runtimeProvider === "container"
           ? "Codex CLI in " + this.config.containerEngine + " Runtime"
           : "Codex CLI in application container",
     };
@@ -481,7 +490,9 @@ export class AgentService {
       const cancelled = error instanceof RunCancelledError;
       const violation = error instanceof WarrantViolationError ? error : null;
       const message = error instanceof Error ? error.message : String(error);
-      const containment = violation ? await this.contain(violation, snapshot) : null;
+      const containment = violation
+        ? await this.contain(violation, snapshot, warrant, monitor.violation?.action ?? null)
+        : null;
       await this.persistSpans(monitor.spans);
       if (!violation) await snapshot.discard();
       await this.store.mutate((database) => {
@@ -526,11 +537,21 @@ export class AgentService {
   private async contain(
     violation: WarrantViolationError,
     snapshot: WorkspaceSnapshot | null,
+    warrant: Warrant,
+    action: import("./warrant/types.js").AgentAction | null,
   ): Promise<RunContainment> {
+    const protectedAsset =
+      action && action.kind === "file_change" ? (action.paths[0] ?? null) : null;
+    const beforeDigest = protectedAsset ? (snapshot?.fileDigest(protectedAsset) ?? null) : null;
     const containment: RunContainment = {
       clause: violation.clause,
       reason: violation.reason,
       action: violation.action,
+      protectedAsset,
+      authorizedScope: warrant.scope.writePaths,
+      beforeDigest,
+      afterDigest: null,
+      assetDigestMatches: false,
       rolledBack: false,
       digestMatches: false,
       fileCount: 0,
@@ -539,8 +560,13 @@ export class AgentService {
     try {
       const report = await snapshot.restore();
       await snapshot.discard();
+      const afterDigest = protectedAsset
+        ? await digestFileAt(this.workspacePathFor(warrant.agentId), protectedAsset)
+        : null;
       return {
         ...containment,
+        afterDigest,
+        assetDigestMatches: beforeDigest === afterDigest,
         rolledBack: report.restored,
         digestMatches: report.digestMatches,
         fileCount: report.fileCount,
@@ -548,6 +574,10 @@ export class AgentService {
     } catch {
       return containment;
     }
+  }
+
+  private workspacePathFor(agentId: string): string {
+    return this.workspaces.workspacePath(agentId);
   }
 
   private async persistSpans(spans: TraceSpan[]): Promise<void> {

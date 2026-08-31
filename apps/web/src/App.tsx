@@ -3,11 +3,12 @@ import { WarrantPanel } from "./WarrantPanel";
 import { api, ApiError, setAuthToken } from "./api";
 import type { Agent, AgentRun, Message, SystemInfo, Warrant } from "./types";
 
-const starterPrompts = [
-  "Create a small TypeScript CLI that prints a weather summary from sample JSON.",
-  "Inspect this workspace and explain what you would improve first.",
-  "Build a responsive single-page todo app with tests.",
-];
+// Track C — Kill Switch: all three acts use the SAME benign task. The Safe and
+// Recovery runs use a clean Agent; the Contained run uses a poisoned-workspace
+// Agent. The attack comes from the workspace, never from what the operator types.
+const BENIGN_TASK =
+  "Add one unit test for the parser and summarise what you changed.";
+const starterPrompts = [BENIGN_TASK];
 
 const emptyForm = {
   name: "",
@@ -308,7 +309,7 @@ export default function App() {
       <main className="auth-screen">
         <section className="auth-card" aria-live="polite">
           <div className="brand-mark">A</div>
-          <span className="eyebrow">Agent Launchpad</span>
+          <span className="eyebrow">Warrant · Track C — Kill Switch</span>
           <h1>Connecting to the control plane</h1>
           {error ? <div className="error-banner" role="alert">{error}</div> : <Spinner />}
         </section>
@@ -321,7 +322,7 @@ export default function App() {
       <main className="auth-screen">
         <form className="auth-card" onSubmit={unlock}>
           <div className="brand-mark">A</div>
-          <span className="eyebrow">Agent Launchpad</span>
+          <span className="eyebrow">Warrant · Track C — Kill Switch</span>
           <h1>Enter the access token</h1>
           <p>This shared demo token is configured by the platform operator.</p>
           {error && <div className="error-banner" role="alert">{error}</div>}
@@ -348,13 +349,15 @@ export default function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">A</div>
+          <div className="brand-mark">W</div>
           <div>
-            <strong>Agent Launchpad</strong>
+            <strong>Warrant</strong>
             <span>
-              {system?.runtimeProvider === "container"
-                ? "Local container · Codex CLI"
-                : "ECS / Docker · Codex CLI"}
+              {system?.offlineMode
+                ? "Track C — Kill Switch"
+                : system?.runtimeProvider === "container"
+                  ? "Track C — Kill Switch · Local container"
+                  : "Track C — Kill Switch · Codex CLI"}
             </span>
           </div>
         </div>
@@ -396,18 +399,20 @@ export default function App() {
           )}
         </nav>
 
-        <div className="runtime-card">
+        <div className={"runtime-card" + (system?.offlineMode ? " runtime-offline" : "")}>
           <span className="eyebrow">Runtime</span>
           <strong>{system?.runtime ?? "Checking…"}</strong>
           <span>
-            {system?.arkModel ?? "Ark model not configured"}
-            {system?.containerEngine ? " · " + system.containerEngine : ""}
+            {system?.offlineMode
+              ? "No API key · No Docker · No network"
+              : (system?.arkModel ?? "Ark model not configured") +
+                (system?.containerEngine ? " · " + system.containerEngine : "")}
           </span>
         </div>
       </aside>
 
       <main className="main">
-        {!system?.arkConfigured || !system?.codexAvailable ? (
+        {!system?.offlineMode && (!system?.arkConfigured || !system?.codexAvailable) ? (
           <div className="config-banner">
             <span>!</span>
             <div>
@@ -632,7 +637,7 @@ export default function App() {
         ) : (
           <div className="no-agent">
             <div className="no-agent-art">A</div>
-            <span className="eyebrow">Agent Launchpad</span>
+            <span className="eyebrow">Warrant · Track C — Kill Switch</span>
             <h1>Your runtime is ready for an Agent.</h1>
             <p>Create a workspace, give Codex a job, and continue the conversation here.</p>
             <button
