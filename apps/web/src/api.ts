@@ -1,4 +1,11 @@
-import type { Agent, AgentRun, Message, SystemInfo } from "./types";
+import type {
+  Agent,
+  AgentRun,
+  Message,
+  SystemInfo,
+  TraceSpan,
+  Warrant,
+} from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -70,7 +77,7 @@ export const api = {
   runs: (id: string) =>
     request<{ runs: AgentRun[] }>("/api/agents/" + id + "/runs"),
   sendMessage: (id: string, content: string) =>
-    request<{ run: AgentRun; message: Message }>(
+    request<{ run: AgentRun; message: Message; warrant: Warrant }>(
       "/api/agents/" + id + "/messages",
       {
         method: "POST",
@@ -78,4 +85,17 @@ export const api = {
       },
     ),
   run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
+  trace: (runId: string) =>
+    request<{ spans: TraceSpan[] }>("/api/runs/" + runId + "/trace"),
+  warrants: (agentId: string) =>
+    request<{ warrants: Warrant[] }>("/api/agents/" + agentId + "/warrants"),
+  decideWarrant: (warrantId: string, approve: boolean) =>
+    request<{ warrant: Warrant; run: AgentRun }>(
+      "/api/warrants/" + warrantId + "/decision",
+      { method: "POST", body: JSON.stringify({ approve }) },
+    ),
+  revokeWarrant: (warrantId: string) =>
+    request<{ warrant: Warrant }>("/api/warrants/" + warrantId + "/revoke", {
+      method: "POST",
+    }),
 };

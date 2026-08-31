@@ -1095,4 +1095,232 @@ textarea:focus {
   .form-grid {
     grid-template-columns: 1fr;
   }
+
+  .workbench {
+    flex-direction: column;
+  }
+
+  .warrant-panel {
+    flex: 1 1 auto;
+    width: 100%;
+    height: auto;
+    min-height: 0;
+  }
+}
+
+.workbench {
+  max-width: 1180px;
+  margin: 0 auto;
+  display: flex;
+  gap: 16px;
+  align-items: stretch;
+}
+
+.workbench .playground {
+  flex: 1 1 auto;
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+.warrant-panel {
+  flex: 0 0 340px;
+  width: 340px;
+  height: calc(100vh - 150px);
+  min-height: 560px;
+  border: 1px solid var(--line);
+  border-radius: 17px;
+  background: var(--paper);
+  box-shadow: 0 12px 36px rgba(43, 42, 38, 0.06);
+  padding: 20px 18px;
+  overflow-y: auto;
+}
+
+.warrant-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.warrant-status {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.warrant-status-pending {
+  color: #8a6d1f;
+  background: #fdf5e2;
+  border-color: #edd9a8;
+}
+
+.warrant-status-approved {
+  color: var(--green);
+  background: #e8f5ef;
+  border-color: #bfe3d3;
+}
+
+.warrant-status-rejected,
+.warrant-status-revoked,
+.warrant-status-expired {
+  color: var(--red);
+  background: #fbeaea;
+  border-color: #eec6c6;
+}
+
+.warrant-summary {
+  margin: 0 0 4px;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.warrant-origin {
+  margin: 0 0 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.warrant-scope {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.warrant-row {
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  gap: 8px;
+  align-items: start;
+}
+
+.warrant-row-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  padding-top: 3px;
+}
+
+.warrant-row-value {
+  font-size: 12px;
+}
+
+.chip-set {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.chip {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--purple-soft);
+  color: var(--purple-dark);
+  border: 1px solid #ded7ff;
+}
+
+.chip-deny {
+  background: #fbeaea;
+  color: var(--red);
+  border-color: #eec6c6;
+}
+
+.chip-allow {
+  background: #e8f5ef;
+  color: var(--green);
+  border-color: #bfe3d3;
+}
+
+.warrant-empty {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.warrant-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.containment {
+  margin-top: 16px;
+  padding: 13px;
+  border: 1px solid #eec6c6;
+  border-radius: 12px;
+  background: #fbeaea;
+}
+
+.containment strong {
+  color: var(--red);
+  font-size: 13px;
+}
+
+.containment-reason {
+  margin: 6px 0 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.containment-facts {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.containment-facts code {
+  font-size: 11px;
+}
+
+.trace {
+  margin-top: 18px;
+}
+
+.trace-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.trace-span {
+  display: grid;
+  grid-template-columns: 16px 1fr auto;
+  gap: 7px;
+  align-items: center;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fff;
+  font-size: 12px;
+}
+
+.trace-span-blocked {
+  border-color: #eec6c6;
+  background: #fbeaea;
+}
+
+.trace-glyph {
+  color: var(--muted);
+  font-weight: 600;
+  text-align: center;
+}
+
+.trace-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }

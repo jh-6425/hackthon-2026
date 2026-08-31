@@ -1,7 +1,11 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
-import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
+import {
+  buildCodexArgs,
+  parseCodexEventLine,
+  violationError,
+} from "./codex-runner.js";
 import { RunCancelledError } from "./errors.js";
 import type {
   AgentRunner,
@@ -187,7 +191,11 @@ export class ContainerCodexRunner implements AgentRunner {
         stdout += chunk.toString("utf8");
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
-        for (const line of lines) parseCodexEventLine(line, parsed);
+        for (const line of lines) parseCodexEventLine(line, parsed, request.observer);
+        if (request.observer?.violation) {
+          void this.removeContainer(active);
+          return;
+        }
       } else {
         stderr += chunk.toString("utf8");
         if (stderr.length > 16_384) stderr = stderr.slice(-16_384);
@@ -208,7 +216,9 @@ export class ContainerCodexRunner implements AgentRunner {
         child.once("error", reject);
         child.once("close", (code) => resolve(code ?? 1));
       });
-      if (stdout.trim()) parseCodexEventLine(stdout.trim(), parsed);
+      if (stdout.trim()) parseCodexEventLine(stdout.trim(), parsed, request.observer);
+      const violation = request.observer ? violationError(request.observer) : null;
+      if (violation) throw violation;
       if (active.cancelled) throw new RunCancelledError();
       if (active.timedOut) {
         throw new Error("Runtime timed out after " + this.config.codexTimeoutMs + " ms");

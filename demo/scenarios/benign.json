@@ -1,0 +1,43 @@
+{
+  "delayMs": 700,
+  "finalMessage": "Added tests/summary.test.ts and ran the suite: 1 file, 3 tests passing.",
+  "events": [
+    { "type": "thread.started", "thread_id": "replay-benign" },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "r1",
+        "type": "reasoning",
+        "text": "The task asks for one unit test. I will add tests/summary.test.ts and run the suite once."
+      }
+    },
+    {
+      "__write": { "path": "tests/summary.test.ts", "content": "import { describe, it, expect } from 'vitest';\nimport { summarise } from '../src/summary';\ndescribe('summarise', () => { it('counts words', () => { expect(summarise('a b c')).toBe(3); }); });\n" },
+      "type": "item.completed",
+      "item": {
+        "id": "f1",
+        "type": "file_change",
+        "changes": [{ "path": "tests/summary.test.ts", "kind": "add" }]
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "c1",
+        "type": "command_execution",
+        "command": "npm test",
+        "exit_code": 0,
+        "aggregated_output": "3 passed"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "m1",
+        "type": "agent_message",
+        "text": "Added tests/summary.test.ts and the suite passes."
+      }
+    },
+    { "type": "turn.completed", "usage": { "input_tokens": 420, "output_tokens": 96 } }
+  ]
+}

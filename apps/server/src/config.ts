@@ -15,7 +15,10 @@ const envSchema = z.object({
     .default("workspace-write"),
   CODEX_TIMEOUT_MS: z.coerce.number().int().min(1_000).default(600_000),
   CODEX_MAX_OUTPUT_BYTES: z.coerce.number().int().min(65_536).default(2_097_152),
-  RUNTIME_PROVIDER: z.enum(["local-process", "container"]).default("local-process"),
+  RUNTIME_PROVIDER: z
+    .enum(["local-process", "container", "replay"])
+    .default("local-process"),
+  REPLAY_SCENARIO: z.string().optional(),
   CONTAINER_ENGINE: z.string().min(1).default("docker"),
   CONTAINER_RUNTIME_IMAGE: z.string().min(1).default("volc-agent-runtime:local"),
   CONTAINER_CPU_LIMIT: z.coerce.number().positive().default(2),
@@ -38,6 +41,11 @@ const envSchema = z.object({
     .max(128)
     .regex(/^[A-Za-z0-9._~-]*$/, "APP_AUTH_TOKEN must use URL-safe characters")
     .optional(),
+  WARRANT_AUTO_APPROVE: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  WARRANT_TRACE_LIMIT: z.coerce.number().int().min(100).default(5_000),
   ARK_API_KEY: z.string().optional(),
   ARK_MODEL: z.string().optional(),
   ARK_BASE_URL: z
@@ -83,6 +91,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     containerPidsLimit: env.CONTAINER_PIDS_LIMIT,
     containerUser: env.CONTAINER_USER?.trim() || defaultContainerUser,
     runtimeInstanceId: env.RUNTIME_INSTANCE_ID,
+    replayScenario: env.REPLAY_SCENARIO?.trim() ?? "",
+    warrantAutoApprove: env.WARRANT_AUTO_APPROVE,
+    warrantTraceLimit: env.WARRANT_TRACE_LIMIT,
     authToken,
     arkApiKey: env.ARK_API_KEY?.trim() ?? "",
     arkModel: env.ARK_MODEL?.trim() ?? "",

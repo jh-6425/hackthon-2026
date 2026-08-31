@@ -80,3 +80,13 @@ the stored Codex thread, and escalate termination after a grace period.
 
 The current container or ECS instance is the POC trust boundary. Ordinary
 containers are not hardened multi-tenant isolation.
+
+## Middleware built on this baseline
+
+This repository implements **Warrant**, an intent-scoped execution-warrant layer
+that occupies all three seams at once: it compiles each task into an approved
+capability envelope, enforces that envelope against the live Codex event stream
+inside `AgentRunner`, and rolls the workspace back when an Agent breaches it.
+
+See [WARRANT.md](WARRANT.md) for the middleware architecture, enforcement
+sequence, policy ordering, and threat model.

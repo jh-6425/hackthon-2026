@@ -22,6 +22,8 @@ const updateAgentBody = createAgentBody.partial().refine(
 const messageBody = z.object({
   content: z.string().trim().min(1).max(50_000),
 });
+const warrantIdParams = z.object({ id: z.string().uuid() });
+const decisionBody = z.object({ approve: z.boolean() });
 
 export async function createApp(
   config: AppConfig,
@@ -126,6 +128,32 @@ export async function createApp(
   app.get("/api/runs/:id", async (request) => {
     const { id } = runIdParams.parse(request.params);
     return { run: service.getRun(id) };
+  });
+
+  app.get("/api/runs/:id/trace", async (request) => {
+    const { id } = runIdParams.parse(request.params);
+    return { spans: service.getSpans(id) };
+  });
+
+  app.get("/api/agents/:id/warrants", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    return { warrants: service.getWarrants(id) };
+  });
+
+  app.get("/api/warrants/:id", async (request) => {
+    const { id } = warrantIdParams.parse(request.params);
+    return { warrant: service.getWarrant(id) };
+  });
+
+  app.post("/api/warrants/:id/decision", async (request) => {
+    const { id } = warrantIdParams.parse(request.params);
+    const { approve } = decisionBody.parse(request.body);
+    return service.decideWarrant(id, approve);
+  });
+
+  app.post("/api/warrants/:id/revoke", async (request) => {
+    const { id } = warrantIdParams.parse(request.params);
+    return { warrant: await service.revokeWarrant(id) };
   });
 
   if (config.nodeEnv === "production") {

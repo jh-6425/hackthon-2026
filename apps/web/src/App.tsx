@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { WarrantPanel } from "./WarrantPanel";
 import { api, ApiError, setAuthToken } from "./api";
-import type { Agent, AgentRun, Message, SystemInfo } from "./types";
+import type { Agent, AgentRun, Message, SystemInfo, Warrant } from "./types";
 
 const starterPrompts = [
   "Create a small TypeScript CLI that prints a weather summary from sample JSON.",
@@ -45,6 +46,7 @@ export default function App() {
   const [form, setForm] = useState(emptyForm);
   const [prompt, setPrompt] = useState("");
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
+  const [activeWarrant, setActiveWarrant] = useState<Warrant | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState<boolean | null>(null);
@@ -98,16 +100,26 @@ export default function App() {
 
   useEffect(() => {
     setActiveRun(null);
+    setActiveWarrant(null);
     setShowSettings(false);
     if (!selectedId) {
       setMessages([]);
       return;
     }
-    void Promise.all([refreshMessages(selectedId), api.runs(selectedId)])
-      .then(([, result]) => {
+    void Promise.all([
+      refreshMessages(selectedId),
+      api.runs(selectedId),
+      api.warrants(selectedId).catch(() => ({ warrants: [] })),
+    ])
+      .then(([, result, warrantResult]) => {
         if (selectedIdRef.current !== selectedId) return;
         const latest = result.runs[0] ?? null;
         setActiveRun(latest);
+        setActiveWarrant(
+          latest
+            ? (warrantResult.warrants.find((item) => item.runId === latest.id) ?? null)
+            : null,
+        );
         if (latest && ["queued", "running"].includes(latest.status)) {
           void pollRun(latest.id, selectedId).catch((reason) =>
             setError(reason instanceof Error ? reason.message : String(reason)),
@@ -231,17 +243,43 @@ export default function App() {
       if (selectedIdRef.current === selected.id) {
         setMessages((current) => [...current, result.message]);
         setActiveRun(result.run);
+        setActiveWarrant(result.warrant);
       }
       setAgents((current) =>
         current.map((agent) =>
           agent.id === selected.id ? { ...agent, status: "busy" } : agent,
         ),
       );
-      await pollRun(result.run.id, selected.id);
+      if (["queued", "running"].includes(result.run.status)) {
+        await pollRun(result.run.id, selected.id);
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       setActiveRun(null);
+      setActiveWarrant(null);
       await refreshAgents();
+    }
+  };
+
+  const handleWarrantDecided = async () => {
+    const agentId = selectedIdRef.current;
+    if (!agentId || !activeRun) return;
+    try {
+      const [runResult, warrantResult] = await Promise.all([
+        api.run(activeRun.id),
+        api.warrants(agentId),
+      ]);
+      setActiveRun(runResult.run);
+      setActiveWarrant(
+        warrantResult.warrants.find((item) => item.runId === activeRun.id) ?? null,
+      );
+      if (["queued", "running"].includes(runResult.run.status)) {
+        await pollRun(runResult.run.id, agentId);
+      } else {
+        await Promise.all([refreshMessages(agentId), refreshAgents()]);
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
     }
   };
 
@@ -477,6 +515,7 @@ export default function App() {
               </form>
             )}
 
+            <div className="workbench">
             <section className="playground">
               <div className="playground-topbar">
                 <div>
@@ -582,6 +621,13 @@ export default function App() {
                 </div>
               </form>
             </section>
+            <WarrantPanel
+              run={activeRun}
+              warrant={activeWarrant}
+              onDecided={() => void handleWarrantDecided()}
+              onError={setError}
+            />
+            </div>
           </>
         ) : (
           <div className="no-agent">

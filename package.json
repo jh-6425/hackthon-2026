@@ -17,7 +17,8 @@
     "test": "npm run test -w @launchpad/server",
     "check": "npm run typecheck && npm run test && npm run build",
     "poc": "./scripts/start-local-poc.sh",
-    "start": "npm run start -w @launchpad/server"
+    "start": "npm run start -w @launchpad/server",
+    "demo": "npm run build -w @launchpad/server && node demo/warrant-demo.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",

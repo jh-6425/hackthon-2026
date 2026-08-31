@@ -2,13 +2,25 @@ import { execFile } from "node:child_process";
 import { spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
-import { RunCancelledError } from "./errors.js";
+import { RunCancelledError, WarrantViolationError } from "./errors.js";
 import type {
   AgentRunner,
   RunUsage,
   RunnerRequest,
   RunnerResult,
 } from "./types.js";
+import { describeAction } from "./warrant/events.js";
+import type { RunObserver } from "./warrant/types.js";
+
+export function violationError(observer: RunObserver): WarrantViolationError | null {
+  const violation = observer.violation;
+  if (!violation) return null;
+  return new WarrantViolationError(
+    violation.decision.clause,
+    violation.decision.reason,
+    describeAction(violation.action),
+  );
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -41,13 +53,19 @@ export function buildCodexArgs(
   return args;
 }
 
-export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
+export function parseCodexEventLine(
+  line: string,
+  parsed: ParsedEvents,
+  observer?: RunObserver | undefined,
+): void {
   let event: Record<string, unknown>;
   try {
     event = JSON.parse(line) as Record<string, unknown>;
   } catch {
     return;
   }
+
+  observer?.observe(event);
 
   if (event.type === "thread.started" && typeof event.thread_id === "string") {
     parsed.threadId = event.thread_id;
@@ -171,7 +189,11 @@ export class CodexRunner implements AgentRunner {
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
         for (const line of lines) {
-          parseCodexEventLine(line, parsed);
+          parseCodexEventLine(line, parsed, request.observer);
+        }
+        if (request.observer?.violation) {
+          this.terminate(active);
+          return;
         }
       } else {
         stderr += chunk.toString("utf8");
@@ -196,7 +218,11 @@ export class CodexRunner implements AgentRunner {
         child.once("close", (code) => resolve(code ?? 1));
       });
       if (stdout.trim()) {
-        parseCodexEventLine(stdout.trim(), parsed);
+        parseCodexEventLine(stdout.trim(), parsed, request.observer);
+      }
+      const violation = request.observer ? violationError(request.observer) : null;
+      if (violation) {
+        throw violation;
       }
       if (active.cancelled) {
         throw new RunCancelledError();

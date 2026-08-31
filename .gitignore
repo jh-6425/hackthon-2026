@@ -14,3 +14,6 @@ coverage/
 deploy/volcengine/.terraform/
 deploy/volcengine/*.tfstate*
 deploy/volcengine/terraform.tfvars
+.demo-data/
+.demo-workspaces/
+.demo-codex/
