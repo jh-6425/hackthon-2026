@@ -43,28 +43,59 @@ export function relativizePath(candidate: string, workspaceRoots: string[]): str
   return normalizePath(normalized);
 }
 
+const COMMAND_FIELDS = ["command", "cmd", "parsed_cmd", "argv"] as const;
+
+function coerceCommand(value: unknown): string | null {
+  if (typeof value === "string" && value.trim().length > 0) return value;
+  if (Array.isArray(value)) {
+    const joined = value
+      .filter((part): part is string => typeof part === "string")
+      .join(" ")
+      .trim();
+    return joined.length > 0 ? joined : null;
+  }
+  return null;
+}
+
 function readCommand(item: Record<string, unknown>): string | null {
-  if (typeof item.command === "string") return item.command;
-  if (Array.isArray(item.command)) {
-    return item.command.filter((part) => typeof part === "string").join(" ");
+  for (const field of COMMAND_FIELDS) {
+    const value = coerceCommand(item[field]);
+    if (value) return value;
+  }
+  return null;
+}
+
+const PATH_FIELDS = [
+  "path",
+  "file_path",
+  "absolute_file_path",
+  "file",
+  "filename",
+] as const;
+
+function pathFromRecord(record: Record<string, unknown>): string | null {
+  for (const field of PATH_FIELDS) {
+    if (typeof record[field] === "string") return record[field] as string;
   }
   return null;
 }
 
 function readChangedPaths(item: Record<string, unknown>): string[] {
-  const { changes } = item;
+  const changes = item.changes ?? item.files ?? item.paths;
   if (Array.isArray(changes)) {
     return changes
       .map((entry) => {
         if (typeof entry === "string") return entry;
         const record = asRecord(entry);
-        return record && typeof record.path === "string" ? record.path : null;
+        return record ? pathFromRecord(record) : null;
       })
       .filter((path): path is string => path !== null);
   }
   const record = asRecord(changes);
   if (record) return Object.keys(record);
-  return [];
+  // Some shapes report a single changed path directly on the item.
+  const direct = pathFromRecord(item);
+  return direct ? [direct] : [];
 }
 
 export function itemToAction(

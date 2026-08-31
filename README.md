@@ -91,6 +91,11 @@ The policy engine is a pure, deterministic function — no LLM in the hot path:
   blocked on the second segment.
 - **Substitution-aware.** `$(...)` and backtick contents are lifted out and
   checked as their own segments.
+- **Schema-tolerant event parsing.** Codex reports commands and file changes as
+  `item.started` / `item.completed` events; the parser accepts the command as a
+  string or an argv array (under `command`, `cmd`, or `parsed_cmd`) and reads
+  changed paths from any of `path`, `file_path`, or `absolute_file_path`, so a
+  minor change in the Codex event shape cannot silently disable a check.
 - **Shell-wrapper transparent.** Codex wraps commands as `bash -lc "<script>"`;
   the wrapper is unwrapped recursively so the real command is evaluated, not the
   `bash` shell it hides behind.
