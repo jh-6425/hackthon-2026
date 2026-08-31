@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cp, lstat, mkdir, readFile, readdir, rm } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, readdir, readlink, realpath, rm } from "node:fs/promises";
 import path from "node:path";
 
 export type WorkspaceDigest = Record<string, string>;
@@ -89,6 +89,31 @@ export function changedPaths(before: WorkspaceDigest, after: WorkspaceDigest): s
   return [...changed].sort();
 }
 
+/**
+ * Throw if any symlink under `root` resolves outside `root`. An escaping symlink
+ * cannot be protected by snapshot/rollback (its target lives outside the tree),
+ * so the run must be refused rather than executed over it.
+ */
+export async function assertNoEscapingSymlinks(root: string): Promise<void> {
+  const realRoot = await realpath(root);
+  const entries = await walk(root);
+  for (const { rel, symlink } of entries) {
+    if (!symlink) continue;
+    const abs = path.join(root, rel);
+    const target = await realpath(abs).catch(async () => {
+      // Dangling link: resolve lexically against its directory.
+      const raw = await readlink(abs).catch(() => "");
+      return path.resolve(path.dirname(abs), raw);
+    });
+    const relToRoot = path.relative(realRoot, target);
+    if (relToRoot !== "" && (relToRoot.split(path.sep)[0] === ".." || path.isAbsolute(relToRoot))) {
+      throw new Error(
+        "Workspace contains a symlink that escapes the workspace: " + rel + " -> " + target,
+      );
+    }
+  }
+}
+
 export interface RollbackReport {
   restored: boolean;
   fileCount: number;
@@ -111,6 +136,8 @@ export class WorkspaceSnapshot {
     await rm(snapshotPath, { recursive: true, force: true });
     await mkdir(path.dirname(snapshotPath), { recursive: true });
     try {
+      // Refuse to run over a workspace that already contains an escaping symlink.
+      await assertNoEscapingSymlinks(workspacePath);
       // Preserve symlinks as links (verbatimSymlinks) so an escaping link is
       // captured faithfully rather than dereferenced into the snapshot.
       await cp(workspacePath, snapshotPath, { recursive: true, verbatimSymlinks: true });

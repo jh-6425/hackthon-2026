@@ -74,19 +74,36 @@ describe("digestWorkspace fail-closed and change detection", () => {
 });
 
 describe("WorkspaceSnapshot symlink awareness", () => {
-  it("captures a symlink by its target and detects a repoint as a change", async () => {
+  it("captures an in-workspace symlink by target and detects a repoint as a change", async () => {
     const { mkdir, symlink, rm, writeFile } = await import("node:fs/promises");
     const os = await import("node:os");
     const root = await mkdtemp(path.join(os.tmpdir(), "warrant-symlink-"));
     roots.push(root);
     const ws = path.join(root, "ws");
     await mkdir(ws, { recursive: true });
-    await symlink("/tmp/a", path.join(ws, "link"));
+    await writeFile(path.join(ws, "a.txt"), "a");
+    await writeFile(path.join(ws, "b.txt"), "b");
+    await symlink("a.txt", path.join(ws, "link")); // relative, in-workspace
     const snap = await WorkspaceSnapshot.capture(ws, path.join(root, "snaps"), "run");
     expect(snap.digest["link"]).toMatch(/^symlink:/);
     await rm(path.join(ws, "link"));
-    await symlink("/tmp/b", path.join(ws, "link"));
+    await symlink("b.txt", path.join(ws, "link"));
     const { digestWorkspace: dw } = await import("./snapshot.js");
     expect((await dw(ws))["link"]).not.toBe(snap.digest["link"]);
+  });
+
+  it("P0-2: refuses to snapshot a workspace with a symlink escaping the workspace", async () => {
+    const { mkdir, symlink, writeFile } = await import("node:fs/promises");
+    const os = await import("node:os");
+    const root = await mkdtemp(path.join(os.tmpdir(), "warrant-escape-"));
+    roots.push(root);
+    const outside = path.join(root, "outside.txt");
+    await writeFile(outside, "SECRET");
+    const ws = path.join(root, "ws", "tests");
+    await mkdir(ws, { recursive: true });
+    await symlink(outside, path.join(ws, "link")); // absolute escape
+    await expect(
+      WorkspaceSnapshot.capture(path.join(root, "ws"), path.join(root, "snaps"), "run"),
+    ).rejects.toThrow(/escapes the workspace/);
   });
 });

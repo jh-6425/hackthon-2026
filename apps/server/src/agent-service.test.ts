@@ -508,3 +508,99 @@ describe("Kill Switch hardening (review round 2)", () => {
     }
   });
 });
+
+describe("Kill Switch hardening (review round 3)", () => {
+  const TASK3 = "Add one unit test for the parser and summarise what you changed.";
+
+  it("P1-3a: a write then a plain throw still rolls the workspace back", async () => {
+    const runner = new ScriptedRunner(async (request) => {
+      await mkdir(path.join(request.workspacePath, "src"), { recursive: true });
+      await writeFile(path.join(request.workspacePath, "src", "parser.ts"), "// tampered\n");
+      throw new Error("boom");
+    });
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    await mkdir(path.join(agent.workspacePath, "src"), { recursive: true });
+    await writeFile(path.join(agent.workspacePath, "src", "parser.ts"), "export const original = true;\n");
+    const before = await import("node:fs/promises").then((m) => m.readFile(path.join(agent.workspacePath, "src", "parser.ts"), "utf8"));
+
+    const { run } = await service.sendMessage(agent.id, TASK3);
+    await expect.poll(() => service.getRun(run.id).status).toBe("failed");
+    const after = await import("node:fs/promises").then((m) => m.readFile(path.join(agent.workspacePath, "src", "parser.ts"), "utf8"));
+    expect(after).toBe(before);
+  });
+
+  it("P1-3b: a write then cancel restores to the pre-run snapshot", async () => {
+    const runner = new ScriptedRunner(async (request) => {
+      await mkdir(path.join(request.workspacePath, "tests"), { recursive: true });
+      await writeFile(path.join(request.workspacePath, "tests", "partial.ts"), "// partial\n");
+      throw new (await import("./errors.js")).RunCancelledError();
+    });
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, TASK3);
+    await expect.poll(() => service.getRun(run.id).status).toBe("cancelled");
+    const exists = await import("node:fs/promises")
+      .then((m) => m.readFile(path.join(agent.workspacePath, "tests", "partial.ts"), "utf8"))
+      .then(() => true)
+      .catch(() => false);
+    expect(exists).toBe(false); // cancel restores the pre-run snapshot
+  });
+
+  it("P1-3c: a persistSpans failure still lands a terminal state (not stuck running)", async () => {
+    const runner = new ScriptedRunner(async () => {});
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    // Break span persistence: it must not skip the safety reconcile or the
+    // terminal state.
+    (service as unknown as { persistSpans: () => Promise<void> }).persistSpans = async () => {
+      throw new Error("db down during persistSpans");
+    };
+    const { run } = await service.sendMessage(agent.id, TASK3);
+    await expect.poll(() => ["completed", "failed", "blocked", "cancelled"].includes(service.getRun(run.id).status)).toBe(true);
+    expect(service.getAgent(agent.id).status).not.toBe("busy");
+  });
+
+  it("P1-4: an in-scope but over-budget batch of silent writes is blocked (maxFileWrites)", async () => {
+    const runner = new ScriptedRunner(async (request) => {
+      const { mkdir, writeFile } = await import("node:fs/promises");
+      await mkdir(path.join(request.workspacePath, "tests"), { recursive: true });
+      for (let i = 0; i < 100; i++) {
+        await writeFile(path.join(request.workspacePath, "tests", "gen" + i + ".test.ts"), "// x\n");
+      }
+    });
+    const service = await makeService(runner, {}, { withSrc: true }); // testsOnlyCompiler: maxFileWrites 2
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, TASK3);
+    await expect.poll(() => service.getRun(run.id).status).toBe("blocked");
+    expect(service.getRun(run.id).containment?.clause).toBe("scope.maxFileWrites");
+  });
+
+  it("P1-5: a restore that reports a digest mismatch quarantines the Agent", async () => {
+    const runner = new ScriptedRunner(async (request) => {
+      emit(request, {
+        type: "item.started",
+        item: { id: "f2", type: "file_change", changes: [{ path: "src/parser.ts" }] },
+      });
+    });
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    await mkdir(path.join(agent.workspacePath, "src"), { recursive: true });
+    await writeFile(path.join(agent.workspacePath, "src", "parser.ts"), "export const original = true;\n");
+
+    const { WorkspaceSnapshot } = await import("./warrant/snapshot.js");
+    const original = WorkspaceSnapshot.prototype.restore;
+    WorkspaceSnapshot.prototype.restore = async function () {
+      return { restored: true, digestMatches: false, fileCount: 3 };
+    };
+    try {
+      const { run } = await service.sendMessage(agent.id, TASK3);
+      await expect.poll(() => service.getRun(run.id).status).toBe("blocked");
+      expect(service.getRun(run.id).containment?.recoveryFailed).toBe(true);
+      expect(service.getAgent(agent.id).status).toBe("error");
+      await expect(service.sendMessage(agent.id, TASK3)).rejects.toMatchObject({ statusCode: 423 });
+    } finally {
+      WorkspaceSnapshot.prototype.restore = original;
+    }
+  });
+});

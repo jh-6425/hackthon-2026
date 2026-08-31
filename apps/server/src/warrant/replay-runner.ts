@@ -1,4 +1,5 @@
-import { mkdir, realpath, stat, writeFile } from "node:fs/promises";
+import { constants as FS } from "node:fs";
+import { lstat, mkdir, open, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { parseCodexEventLine, violationError } from "../codex-runner.js";
 import { RunCancelledError } from "../errors.js";
@@ -145,6 +146,7 @@ export class ReplayRunner implements AgentRunner {
   ): Promise<void> {
     const root = path.resolve(workspacePath);
     const target = path.resolve(root, write.path);
+    const realRoot = await realpath(root);
 
     // Lexical containment: reject `..` path components and absolute escapes.
     const relative = path.relative(root, target);
@@ -153,22 +155,42 @@ export class ReplayRunner implements AgentRunner {
       throw new Error("Replay write escapes the workspace: " + write.path);
     }
 
-    // Physical containment: resolve symlinks on the deepest existing ancestor and
-    // ensure the real location is still inside the real workspace, so a
-    // `tests -> /tmp/outside` symlink cannot smuggle a write out of the tree.
-    const realRoot = await realpath(root);
+    // Physical containment of the PARENT: resolve symlinks on the deepest existing
+    // ancestor so a `tests -> /tmp/outside` directory link cannot smuggle a write
+    // out of the tree.
     const realParent = await realpathAncestor(path.dirname(target));
-    const realRelative = path.relative(realRoot, realParent);
-    if (
-      realRelative !== "" &&
-      (realRelative.split(path.sep)[0] === ".." || path.isAbsolute(realRelative))
-    ) {
+    if (escapes(realRoot, realParent)) {
       throw new Error("Replay write escapes the workspace via a symlink: " + write.path);
     }
 
+    // Physical containment of the TARGET ITSELF: if it already exists as a
+    // symlink, its real location must be inside the workspace, otherwise writing
+    // through it would overwrite an external file (e.g. tests/out.txt -> /tmp/x).
+    const existing = await lstat(target).catch(() => null);
+    if (existing?.isSymbolicLink()) {
+      const realTarget = await realpath(target).catch(() => null);
+      if (!realTarget || escapes(realRoot, realTarget)) {
+        throw new Error("Replay write escapes the workspace via a symlink: " + write.path);
+      }
+    }
+
     await mkdir(path.dirname(target), { recursive: true });
-    await writeFile(target, write.content);
+    // O_NOFOLLOW closes the TOCTOU window: if the final component is (or becomes)
+    // a symlink between the check and the open, the open fails instead of
+    // following it out of the workspace.
+    const handle = await open(target, FS.O_WRONLY | FS.O_CREAT | FS.O_TRUNC | FS.O_NOFOLLOW);
+    try {
+      await handle.writeFile(write.content);
+    } finally {
+      await handle.close();
+    }
   }
+}
+
+/** True when `target` (already real) is not inside real `root`. */
+function escapes(realRoot: string, target: string): boolean {
+  const rel = path.relative(realRoot, target);
+  return rel !== "" && (rel.split(path.sep)[0] === ".." || path.isAbsolute(rel));
 }
 
 /** realpath of the deepest ancestor of `p` that actually exists. */

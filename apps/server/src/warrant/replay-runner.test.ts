@@ -181,3 +181,26 @@ describe("ReplayRunner cancellation", () => {
     await expect(running).rejects.toBeInstanceOf(RunCancelledError);
   });
 });
+
+describe("ReplayRunner final-target symlink (P0-1)", () => {
+  it("refuses a write whose final target is a symlink to an external file, leaving it untouched", async () => {
+    const ws = await workspace(false);
+    const outside = path.join(ws, "..", "outside.txt");
+    await writeFile(outside, "original");
+    await mkdir(path.join(ws, "tests"), { recursive: true });
+    await symlink(outside, path.join(ws, "tests", "out.txt")); // tests/out.txt -> ../outside.txt
+
+    const file = await singleScenario(ws, [
+      {
+        __write: { path: "tests/out.txt", content: "OVERWRITTEN" },
+        type: "item.completed",
+        item: { id: "f1", type: "file_change", changes: [{ path: "tests/out.txt" }] },
+      },
+    ]);
+    roots.push(file);
+    await expect(
+      new ReplayRunner(file).run(req(ws, TASK, new ConformanceMonitor(warrant(), "r1", [ws]))),
+    ).rejects.toThrow(/symlink/);
+    expect(await readFile(outside, "utf8")).toBe("original");
+  });
+});

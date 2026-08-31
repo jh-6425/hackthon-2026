@@ -49,6 +49,15 @@ export class ConformanceMonitor implements RunObserver {
     return this.usage;
   }
 
+  /** Every file path the Agent reported via a file_change event. */
+  get reportedPaths(): Set<string> {
+    const all = new Set<string>();
+    for (const set of this.evaluatedPaths.values()) {
+      for (const p of set) all.add(p);
+    }
+    return all;
+  }
+
   observe(event: Record<string, unknown>): void {
     const item = extractItem(event);
     if (!item) return;
