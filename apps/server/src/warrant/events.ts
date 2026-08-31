@@ -2,7 +2,7 @@ import { normalizePath, toSlash } from "./glob.js";
 import type { AgentAction } from "./types.js";
 
 export interface RuntimeItem {
-  id: string;
+  id: string | null;
   type: string;
   raw: Record<string, unknown>;
 }
@@ -18,8 +18,8 @@ export function extractItem(event: Record<string, unknown>): RuntimeItem | null 
   if (!item) return null;
   const type = typeof item.type === "string" ? item.type : null;
   if (!type) return null;
-  const id = typeof item.id === "string" ? item.id : type;
-  return { id, type, raw: item };
+  const rawId = typeof item.id === "string" && item.id.length > 0 ? item.id : null;
+  return { id: rawId, type, raw: item };
 }
 
 export function relativizePath(candidate: string, workspaceRoots: string[]): string {
@@ -104,13 +104,13 @@ export function itemToAction(
 ): AgentAction | null {
   if (item.type === "command_execution") {
     const command = readCommand(item.raw);
-    return command ? { kind: "command", itemId: item.id, command } : null;
+    return command ? { kind: "command", itemId: item.id ?? "", command } : null;
   }
   if (item.type === "file_change" || item.type === "patch_apply") {
     const paths = readChangedPaths(item.raw).map((path) =>
       relativizePath(path, workspaceRoots),
     );
-    return paths.length > 0 ? { kind: "file_change", itemId: item.id, paths } : null;
+    return paths.length > 0 ? { kind: "file_change", itemId: item.id ?? "", paths } : null;
   }
   if (item.type === "mcp_tool_call" || item.type === "web_search") {
     const name =
@@ -119,7 +119,7 @@ export function itemToAction(
         : typeof item.raw.name === "string"
           ? item.raw.name
           : item.type;
-    return { kind: "tool_call", itemId: item.id, tool: name };
+    return { kind: "tool_call", itemId: item.id ?? "", tool: name };
   }
   return null;
 }

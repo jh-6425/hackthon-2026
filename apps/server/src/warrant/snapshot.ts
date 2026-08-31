@@ -7,6 +7,14 @@ import path from "node:path";
 // corrupt add/remove/change detection.
 export type WorkspaceDigest = Map<string, string>;
 
+/** A CONFIRMED escaping/cyclic symlink (distinct from an I/O verification error). */
+export class SymlinkEscapeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SymlinkEscapeError";
+  }
+}
+
 function errCode(error: unknown): string | null {
   return typeof error === "object" && error !== null && "code" in error
     ? String((error as { code?: unknown }).code)
@@ -132,7 +140,7 @@ export async function assertNoEscapingSymlinks(root: string): Promise<void> {
     } catch (error) {
       const code = errCode(error);
       if (code === "ELOOP") {
-        throw new Error("Workspace contains a cyclic symlink: " + rel);
+        throw new SymlinkEscapeError("Workspace contains a cyclic symlink: " + rel);
       }
       if (code && code !== "ENOENT") {
         // EACCES / EIO / anything unverifiable -> fail closed.
@@ -151,7 +159,7 @@ export async function assertNoEscapingSymlinks(root: string): Promise<void> {
       resolved = path.resolve(realDir, raw);
     }
     if (escapesRoot(realRoot, resolved)) {
-      throw new Error(
+      throw new SymlinkEscapeError(
         "Workspace contains a symlink that escapes the workspace: " + rel + " -> " + resolved,
       );
     }

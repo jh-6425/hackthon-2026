@@ -71,7 +71,7 @@ export class ReplayRunner implements AgentRunner {
         // monitor de-duplicates by canonical key, so two real writes would slip
         // past the write budget otherwise.
         const item = extractItem(event);
-        const writeKey = (item?.id ?? item?.type ?? "?") + "|" + key;
+        const writeKey = JSON.stringify([item?.id ?? item?.type ?? "?", key]);
         if (executedWrites.has(writeKey)) {
           throw new Error("Replay performs a duplicate physical write for " + __write.path);
         }
@@ -117,6 +117,9 @@ export class ReplayRunner implements AgentRunner {
     // relativization + canonicalization so an absolute-vs-relative or ./ vs
     // literal difference cannot cause a false accept or false reject.
     const item = extractItem(event);
+    if (item && item.id === null) {
+      throw new Error("Replay __write requires a non-empty item.id for accounting");
+    }
     const action = item ? itemToAction(item, [workspaceRoot]) : null;
     if (!action || action.kind !== "file_change" || action.paths.length === 0) {
       throw new Error(
@@ -125,8 +128,10 @@ export class ReplayRunner implements AgentRunner {
       );
     }
     const wanted = canonicalizePath(relativizePath(writePath, [workspaceRoot]));
-    const reported = action.paths.map((p) => canonicalizePath(p));
-    if (!reported.includes(wanted)) {
+    const reported = [...new Set(action.paths.map((p) => canonicalizePath(p)))];
+    // A singular __write must correspond to EXACTLY the reported path set, so it
+    // cannot inflate the write budget with paths it never actually wrote.
+    if (reported.length !== 1 || reported[0] !== wanted) {
       throw new Error(
         "Replay scenario is inconsistent: it writes '" +
           writePath +

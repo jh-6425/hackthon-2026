@@ -999,3 +999,106 @@ describe("maxFileWrites changed-path semantics (R6-5 contract)", () => {
     expect(run.status).toBe("completed");
   });
 });
+
+describe("Review 7 fixes", () => {
+  const T = "Add one unit test for the parser and summarise what you changed.";
+
+  it("R7-1: a reported absolute out-of-workspace path is blocked, not collapsed", async () => {
+    const runner = {
+      async run(request: { observer?: { observe: (e: unknown) => void; violation: unknown } }) {
+        request.observer?.observe({ type: "item.completed", item: { id: "f1", type: "file_change", changes: [{ path: "/etc/passwd" }] } });
+        return { output: "done", threadId: "t", usage: null };
+      },
+      async cancel() { return false; },
+      async isAvailable() { return true; },
+    };
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, T);
+    await expect.poll(() => service.getRun(run.id).status).toBe("blocked");
+    expect(service.getRun(run.id).containment?.clause).toBe("scope.writePaths");
+  });
+
+  it("R7-3: two id-less writes to the same path are both counted (no dedup bypass)", async () => {
+    const runner = {
+      async run(request: { observer?: { observe: (e: unknown) => void; violation: unknown }; workspacePath: string }) {
+        const { mkdir, writeFile } = await import("node:fs/promises");
+        await mkdir(path.join(request.workspacePath, "tests"), { recursive: true });
+        await writeFile(path.join(request.workspacePath, "tests", "a.ts"), "1");
+        request.observer?.observe({ type: "item.completed", item: { type: "file_change", changes: [{ path: "tests/a.ts" }] } });
+        await writeFile(path.join(request.workspacePath, "tests", "a.ts"), "2");
+        request.observer?.observe({ type: "item.completed", item: { type: "file_change", changes: [{ path: "tests/a.ts" }] } });
+        return { output: "done", threadId: "t", usage: null };
+      },
+      async cancel() { return false; },
+      async isAvailable() { return true; },
+    };
+    const service = await makeService(runner, {}, { withSrc: true }); // maxFileWrites 2
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, T);
+    // Two id-less writes count as 2 (not 1). With budget 2 they are allowed;
+    // the key assertion is that reportedWriteCount reflects both.
+    await expect.poll(() => ["completed", "blocked"].includes(service.getRun(run.id).status)).toBe(true);
+    expect(service.getRun(run.id).diagnostics!.reportedWriteCount).toBe(2);
+  });
+
+  it("R7-4: a Runner-thrown fake violation cannot override the monitor's real clause", async () => {
+    const { WarrantViolationError } = await import("./errors.js");
+    const runner = {
+      async run(request: { observer?: { observe: (e: unknown) => void; violation: unknown } }) {
+        request.observer?.observe({ type: "item.started", item: { id: "f2", type: "file_change", changes: [{ path: "src/parser.ts" }] } });
+        throw new WarrantViolationError("scope.tools", "fake", "fake", "fake");
+      },
+      async cancel() { return false; },
+      async isAvailable() { return true; },
+    };
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    await mkdir(path.join(agent.workspacePath, "src"), { recursive: true });
+    await writeFile(path.join(agent.workspacePath, "src", "parser.ts"), "export const o = 1;\n");
+    const { run } = await service.sendMessage(agent.id, T);
+    await expect.poll(() => service.getRun(run.id).status).toBe("blocked");
+    expect(service.getRun(run.id).containment?.clause).toBe("scope.writePaths"); // monitor wins
+  });
+
+  it("R7-5a: a getter is read exactly once (no TOCTOU); a hostile BigInt never reaches the store", async () => {
+    let reads = 0;
+    const hostile = {
+      async run() {
+        return { get output() { reads++; return reads === 1 ? "ok" : (1n as unknown as string); }, threadId: null, usage: null };
+      },
+      async cancel() { return false; },
+      async isAvailable() { return true; },
+    };
+    const service = await makeService(hostile, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, T);
+    await expect.poll(() => ["completed", "failed"].includes(service.getRun(run.id).status)).toBe(true);
+    // The stored output is the single validated read; a later BigInt is never used.
+    const stored = service.getRun(run.id);
+    expect(stored.output === null || stored.output === "ok").toBe(true);
+    expect(service.getAgent(agent.id).status).not.toBe("busy"); // never stuck
+  });
+
+  it("R7-5b: a getter that THROWS becomes a normal failure, not a stuck run", async () => {
+    const hostile = {
+      async run() { return { get output(): string { throw new Error("boom getter"); }, threadId: null, usage: null }; },
+      async cancel() { return false; },
+      async isAvailable() { return true; },
+    };
+    const service = await makeService(hostile, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, T);
+    await expect.poll(() => service.getRun(run.id).status).toBe("failed");
+    expect(service.getAgent(agent.id).status).not.toBe("busy");
+  });
+
+  it("R7-throw-undefined: throw undefined is a failure, not a completion", async () => {
+    const runner = { async run() { throw undefined; }, async cancel() { return false; }, async isAvailable() { return true; } };
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, T);
+    await expect.poll(() => service.getRun(run.id).status).toBe("failed");
+    expect((service.getRun(run.id).error ?? "").length).toBeGreaterThan(0);
+  });
+});

@@ -296,3 +296,27 @@ describe("ReplayRunner duplicate write + consistent relativization (R6)", () => 
     expect(await readFile(abs, "utf8")).toBe("x");
   });
 });
+
+describe("ReplayRunner R7 accounting", () => {
+  it("R7-6.1: a __write whose event reports an EXTRA path is rejected", async () => {
+    const ws = await workspace(false);
+    const file = await singleScenario(ws, [
+      { __write: { path: "tests/a.ts", content: "x" }, type: "item.completed", item: { id: "f1", type: "file_change", changes: [{ path: "tests/a.ts" }, { path: "tests/b.ts" }] } },
+    ]);
+    roots.push(file);
+    await expect(
+      new ReplayRunner(file).run(req(ws, TASK, new ConformanceMonitor({ ...warrant(), scope: { ...warrant().scope, writePaths: ["**"] } }, "r1", [ws]))),
+    ).rejects.toThrow(/inconsistent/);
+  });
+
+  it("R7-3: a __write on an id-less event is rejected", async () => {
+    const ws = await workspace(false);
+    const file = await singleScenario(ws, [
+      { __write: { path: "tests/a.ts", content: "x" }, type: "item.completed", item: { type: "file_change", changes: [{ path: "tests/a.ts" }] } },
+    ]);
+    roots.push(file);
+    await expect(
+      new ReplayRunner(file).run(req(ws, TASK, new ConformanceMonitor(warrant(), "r1", [ws]))),
+    ).rejects.toThrow(/non-empty item\.id/);
+  });
+});

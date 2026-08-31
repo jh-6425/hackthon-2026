@@ -35,11 +35,39 @@ describe("JsonStore migration of historic data", () => {
     expect(run.diagnostics).toMatchObject({
       outOfBandPaths: ["tests/a.ts"], // preserved
       changedPaths: [], reportedPaths: [], strayPaths: [], reportedWriteCount: 0,
-      reconciliationStatus: "verified", reconciliationError: null,
+      reconciliationStatus: "unverifiable",
+      reconciliationError: "Legacy run predates reconciliation status",
     });
     // containment gets recoveryError
     expect(run.containment).toHaveProperty("recoveryError", null);
     // agents get quarantine defaults
     expect(db.agents[0]).toMatchObject({ quarantined: false, quarantineReason: null });
+  });
+});
+
+describe("JsonStore rejects/normalizes dirty nested types (R7-8)", () => {
+  const load = async (run: unknown) => {
+    const { mkdtemp, mkdir, writeFile } = await import("node:fs/promises");
+    const os = await import("node:os");
+    const root = await mkdtemp(os.tmpdir() + "/warrant-dirty-");
+    roots.push(root);
+    const file = root + "/launchpad.json";
+    await mkdir(root, { recursive: true });
+    await writeFile(file, JSON.stringify({ version: 1, agents: [], messages: [], runs: [run], warrants: [], spans: [] }));
+    const store = new JsonStore(file);
+    await store.initialize();
+    return store.snapshot().runs[0]!;
+  };
+  const base = { id: "r", agentId: "a", status: "failed", prompt: "p", output: null, error: "e", usage: null, warrantId: "w", startedAt: "t", completedAt: "t", createdAt: "t" };
+
+  it("string diagnostics/containment become null (no fake evidence)", async () => {
+    const run = await load({ ...base, diagnostics: "bad", containment: "bad" });
+    expect(run.diagnostics).toBeNull();
+    expect(run.containment).toBeNull();
+  });
+  it("array containment becomes null; wrong field types get safe defaults", async () => {
+    const run = await load({ ...base, containment: [], diagnostics: { changedPaths: "bad", reportedWriteCount: "7", reconciliationStatus: "bogus" } });
+    expect(run.containment).toBeNull();
+    expect(run.diagnostics).toMatchObject({ changedPaths: [], reportedWriteCount: 0, reconciliationStatus: "unverifiable" });
   });
 });

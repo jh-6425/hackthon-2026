@@ -223,6 +223,13 @@ function evaluateFileChange(
     );
   }
   for (const path of paths) {
+    if (path === "" || path === ".") {
+      return block(
+        "scope.writePaths",
+        "A write resolved to the workspace root, which is never in scope",
+        path,
+      );
+    }
     if (escapesWorkspace(path)) {
       return block(
         "scope.writePaths",

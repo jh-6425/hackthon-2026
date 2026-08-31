@@ -29,6 +29,7 @@ export class ConformanceMonitor implements RunObserver {
   private readonly narrated = new Set<string>();
   private readonly collected: TraceSpan[] = [];
   private violationState: WarrantViolation | null = null;
+  private noIdSeq = 0;
 
   constructor(
     private readonly warrant: Warrant,
@@ -39,22 +40,24 @@ export class ConformanceMonitor implements RunObserver {
   ) {}
 
   get violation(): WarrantViolation | null {
-    return this.violationState;
+    // Return a defensive deep copy so a Runner holding the observer cannot mutate
+    // the recorded violation (clause/subject/paths) and poison containment.
+    return this.violationState ? structuredClone(this.violationState) : null;
   }
 
   get spans(): TraceSpan[] {
-    return this.collected;
+    return structuredClone(this.collected);
   }
 
   get consumption(): WarrantUsage {
-    return this.usage;
+    return { ...this.usage };
   }
 
   /** Every file path the Agent reported via a file_change event. */
   get reportedPaths(): Set<string> {
     const all = new Set<string>();
     for (const set of this.evaluatedPaths.values()) {
-      for (const p of set) all.add(p);
+      for (const p of set) if (p !== "") all.add(p);
     }
     return all;
   }
@@ -65,8 +68,9 @@ export class ConformanceMonitor implements RunObserver {
 
     const narrativeKind = NARRATIVE_KINDS[item.type];
     if (narrativeKind) {
-      if (event.type !== "item.completed" || this.narrated.has(item.id)) return;
-      this.narrated.add(item.id);
+      const narrKey = item.id ?? "__noid_" + this.noIdSeq++;
+      if (event.type !== "item.completed" || this.narrated.has(narrKey)) return;
+      this.narrated.add(narrKey);
       const text = typeof item.raw.text === "string" ? item.raw.text : "";
       this.push(narrativeKind, item.type, truncate(text), null, "ok");
       return;
@@ -74,6 +78,9 @@ export class ConformanceMonitor implements RunObserver {
 
     const action = itemToAction(item, this.workspaceRoots);
     if (!action) return;
+    // A missing item id must NOT be de-duplicated by a shared fallback (that
+    // would let two real writes count once). Give each id-less item a unique key.
+    const itemKey = item.id ?? "__noid_" + this.noIdSeq++;
 
     if (action.kind === "file_change") {
       // Canonicalize and de-duplicate BEFORE counting so tests/a.ts and
@@ -87,16 +94,16 @@ export class ConformanceMonitor implements RunObserver {
           canonical.push(key);
         }
       }
-      const seen = this.evaluatedPaths.get(action.itemId) ?? new Set<string>();
+      const seen = this.evaluatedPaths.get(itemKey) ?? new Set<string>();
       const fresh = canonical.filter((path) => !seen.has(path));
       if (fresh.length === 0) return;
       for (const path of fresh) seen.add(path);
-      this.evaluatedPaths.set(action.itemId, seen);
-      this.inspect({ kind: "file_change", itemId: action.itemId, paths: fresh });
+      this.evaluatedPaths.set(itemKey, seen);
+      this.inspect({ kind: "file_change", itemId: itemKey, paths: fresh });
       return;
     }
 
-    const key = action.kind + ":" + action.itemId;
+    const key = action.kind + ":" + itemKey;
     if (this.evaluated.has(key)) return;
     this.evaluated.add(key);
     this.inspect(action);

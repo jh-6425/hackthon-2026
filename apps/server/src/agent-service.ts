@@ -20,7 +20,7 @@ import {
   type IntentCompiler,
 } from "./warrant/compiler.js";
 import { ConformanceMonitor } from "./warrant/monitor.js";
-import { WorkspaceSnapshot, changedPaths, digestFileAt } from "./warrant/snapshot.js";
+import { SymlinkEscapeError, WorkspaceSnapshot, changedPaths, digestFileAt } from "./warrant/snapshot.js";
 import { canonicalizePath, matchesAny } from "./warrant/glob.js";
 import { describeAction } from "./warrant/events.js";
 import type { AgentAction, PolicyDecision } from "./warrant/types.js";
@@ -66,6 +66,14 @@ export function safeErrorMessage(error: unknown): string {
   }
 }
 
+function isValidDecision(d: { clause?: unknown; reason?: unknown }): boolean {
+  return (
+    typeof d.clause === "string" &&
+    d.clause.length > 0 &&
+    typeof d.reason === "string"
+  );
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
@@ -81,23 +89,35 @@ const USAGE_KEYS = ["inputTokens", "cachedInputTokens", "outputTokens"] as const
  * the caller treats as a failure (fail closed).
  */
 function normalizeRunnerResult(value: unknown): RunnerResult | null {
-  if (!isPlainObject(value)) return null;
-  if (typeof value.output !== "string" || value.output.trim().length === 0) return null;
-  if (!(value.threadId === null || typeof value.threadId === "string")) return null;
+  try {
+    if (!isPlainObject(value)) return null;
+    // Read each field EXACTLY ONCE into a local, so a getter cannot return a
+    // different value at validation time vs copy time (TOCTOU).
+    const output: unknown = value.output;
+    const threadId: unknown = value.threadId;
+    const rawUsage: unknown = value.usage;
 
-  let usage: RunnerResult["usage"] = null;
-  if (value.usage !== null && value.usage !== undefined) {
-    if (!isPlainObject(value.usage)) return null;
-    const clean: Record<string, number> = {};
-    for (const key of USAGE_KEYS) {
-      const v = value.usage[key];
-      if (v === undefined) continue;
-      if (!(typeof v === "number" && Number.isSafeInteger(v) && v >= 0)) return null;
-      clean[key] = v;
+    if (typeof output !== "string" || output.trim().length === 0) return null;
+    if (!(threadId === null || typeof threadId === "string")) return null;
+
+    let usage: RunnerResult["usage"] = null;
+    if (rawUsage !== null && rawUsage !== undefined) {
+      if (!isPlainObject(rawUsage)) return null;
+      const clean: Record<string, number> = {};
+      for (const key of USAGE_KEYS) {
+        const v: unknown = rawUsage[key]; // read once
+        if (v === undefined) continue;
+        if (!(typeof v === "number" && Number.isSafeInteger(v) && v >= 0)) return null;
+        clean[key] = v;
+      }
+      usage = clean;
     }
-    usage = clean;
+    // Fresh object of validated primitives only — no Runner reference retained.
+    return { output, threadId, usage };
+  } catch {
+    // A hostile getter / Proxy that throws becomes a normal failure.
+    return null;
   }
-  return { output: value.output, threadId: value.threadId, usage };
 }
 
 
@@ -616,18 +636,20 @@ export class AgentService {
   ): Promise<void> {
     const completedAt = now();
     const cancelled = runError instanceof RunCancelledError;
-    let violation = runError instanceof WarrantViolationError ? runError : null;
-    // The monitor is authoritative: even if a Runner ignored observer.violation
-    // and returned normally, a blocked action means the run is blocked. Safety
-    // must not depend on the Runner cooperating.
-    if (!violation && monitor.violation) {
-      const decision = monitor.violation.decision;
+    // The MONITOR is authoritative and takes precedence over any violation the
+    // Runner throws: a Runner cannot downgrade, relabel, or fabricate a different
+    // clause. The Runner error is still preserved separately as a distinct reason.
+    let violation: WarrantViolationError | null = null;
+    const monitorViolation = monitor.violation; // defensive copy
+    if (monitorViolation && isValidDecision(monitorViolation.decision)) {
       violation = new WarrantViolationError(
-        decision.clause,
-        decision.reason,
-        describeAction(monitor.violation.action),
-        decision.subject,
+        monitorViolation.decision.clause,
+        monitorViolation.decision.reason,
+        describeAction(monitorViolation.action),
+        monitorViolation.decision.subject,
       );
+    } else if (runError instanceof WarrantViolationError && isValidDecision(runError)) {
+      violation = runError;
     }
 
     // Reconcile on EVERY terminal path (success, failure, cancel, timeout) to
@@ -652,7 +674,7 @@ export class AgentService {
       reconciliationStatus: recon.unverifiable ? "unverifiable" : "verified",
       reconciliationError: recon.unverifiable ? recon.decision.reason : null,
       changedPaths: recon.changed,
-      reportedPaths: [...new Set([...monitor.reportedPaths].map(canonicalizePath))].sort(),
+      reportedPaths: [...new Set([...monitor.reportedPaths].map((p) => canonicalizePath(p)))].sort(),
       outOfBandPaths: recon.outOfBand,
       strayPaths: recon.stray,
       reportedWriteCount: monitor.consumption.fileWrites,
@@ -686,7 +708,7 @@ export class AgentService {
 
     // A blocked run always carries a descriptive error; recovery failures carry
     // the specific reason, never a generic string.
-    const message = this.terminalMessage(outcome, runError, containment, diagnostics, recoveryError);
+    const message = this.terminalMessage(outcome, hasError, runError, containment, diagnostics, recoveryError);
 
     let persisted = false;
     try {
@@ -765,6 +787,7 @@ export class AgentService {
 
   private terminalMessage(
     outcome: AgentRun["status"],
+    hasError: boolean,
     runError: unknown,
     containment: RunContainment | null,
     diagnostics: RunDiagnostics,
@@ -773,7 +796,7 @@ export class AgentService {
     if (outcome === "completed") return null;
     if (outcome === "blocked" && containment) {
       const parts = [
-        runError !== undefined ? "runner: " + safeErrorMessage(runError) : null,
+        hasError ? "runner: " + safeErrorMessage(runError) : null,
         "Blocked by " + containment.clause,
         containment.protectedAsset ? "path " + containment.protectedAsset : null,
         containment.recoveryFailed
@@ -790,7 +813,7 @@ export class AgentService {
     }
     // failed / cancelled / timeout: record both the runner error and any recovery
     // failure reason (findings 19), each distinct.
-    const runMsg = runError !== undefined ? safeErrorMessage(runError) : "Run did not complete";
+    const runMsg = hasError ? safeErrorMessage(runError) : "Run did not complete";
     return recoveryError ? runMsg + " | recovery: " + recoveryError : runMsg;
   }
 
@@ -919,7 +942,7 @@ export class AgentService {
     symlinkEscape: boolean;
     unverifiable: boolean;
   }> {
-    const reported = new Set([...reportedPaths].map(canonicalizePath));
+    const reported = new Set([...reportedPaths].map((p) => canonicalizePath(p)));
     const base = {
       changed: [] as string[],
       stray: [] as string[],
@@ -930,17 +953,21 @@ export class AgentService {
     try {
       await snapshot.assertNoEscape();
     } catch (error) {
+      const confirmedEscape = error instanceof SymlinkEscapeError;
       return {
         decision: {
           verdict: "block",
           clause: "scope.writePaths",
-          reason: "A symlink escaped the workspace during the run: " + safeErrorMessage(error),
+          reason: confirmedEscape
+            ? "A symlink escaped the workspace during the run: " + safeErrorMessage(error)
+            : "The workspace symlinks could not be verified after the run: " + safeErrorMessage(error),
           subject: null,
         },
         verdict: "block",
         ...base,
-        symlinkEscape: true,
-        unverifiable: false,
+        // Only a CONFIRMED escape is symlinkEscape; an I/O failure is unverifiable.
+        symlinkEscape: confirmedEscape,
+        unverifiable: !confirmedEscape,
       };
     }
 
@@ -962,7 +989,7 @@ export class AgentService {
       };
     }
 
-    const changed = changedPaths(snapshot.digest, after).map(canonicalizePath);
+    const changed = changedPaths(snapshot.digest, after).map((p) => canonicalizePath(p));
     const outOfBand = changed.filter((path) => !reported.has(path));
     const stray = changed.filter((path) => !matchesAny(warrant.scope.writePaths, path));
     const rich = { changed, stray, outOfBand };

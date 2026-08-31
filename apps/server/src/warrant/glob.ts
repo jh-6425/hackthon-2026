@@ -43,12 +43,13 @@ export function normalizePath(input: string): string {
   return toSlash(input).replace(/^\.\//, "").replace(/^\/+/, "");
 }
 
-export function escapesWorkspace(input: string): boolean {
-  const normalized = toSlash(input);
-  if (normalized.startsWith("/") || /^[a-zA-Z]:/.test(normalized)) return true;
-  return normalized
-    .split("/")
-    .some((segment) => segment === "..");
+export function escapesWorkspace(input: string, win: boolean = IS_WINDOWS): boolean {
+  const normalized = win ? input.replace(/\\/g, "/") : input;
+  // POSIX absolute, or Windows drive/UNC absolute -> escape.
+  if (normalized.startsWith("/")) return true;
+  if (win && (/^[a-zA-Z]:/.test(normalized) || normalized.startsWith("//"))) return true;
+  // Any ".." path segment -> escape.
+  return normalized.split("/").some((segment) => segment === "..");
 }
 
 export function matchesAny(patterns: string[], candidate: string): boolean {
@@ -68,9 +69,25 @@ export function matchesAny(patterns: string[], candidate: string): boolean {
  * separator; ".", "" and ".." segments are resolved lexically (a leading ".."
  * is preserved so an escape stays visible).
  */
-export function canonicalizePath(input: string): string {
+export function canonicalizePath(input: string, win: boolean = IS_WINDOWS): string {
+  const slashed = win ? input.replace(/\\/g, "/") : input;
+  // Preserve a rooted prefix so an absolute / UNC / drive path stays clearly
+  // non-relative and is rejected by escapesWorkspace instead of being collapsed
+  // into a look-alike in-workspace path.
+  let prefix = "";
+  let rest = slashed;
+  if (slashed.startsWith("//")) {
+    prefix = "//"; // UNC
+    rest = slashed.slice(2);
+  } else if (slashed.startsWith("/")) {
+    prefix = "/"; // POSIX / Windows root-relative
+    rest = slashed.slice(1);
+  } else if (win && /^[a-zA-Z]:/.test(slashed)) {
+    prefix = slashed.slice(0, 2) + "/"; // drive
+    rest = slashed.slice(2).replace(/^\/+/, "");
+  }
   const segments: string[] = [];
-  for (const seg of input.split("/")) {
+  for (const seg of rest.split("/")) {
     if (seg === "" || seg === ".") continue;
     if (seg === "..") {
       if (segments.length > 0 && segments[segments.length - 1] !== "..") {
@@ -82,5 +99,5 @@ export function canonicalizePath(input: string): string {
     }
     segments.push(seg);
   }
-  return segments.join("/");
+  return prefix + segments.join("/");
 }
