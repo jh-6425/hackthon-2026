@@ -323,6 +323,58 @@ describe("Execution warrants", () => {
     expect(service.getSpans(run.id)).toHaveLength(1);
   });
 
+  it("blocks a file_change to an absolute path outside the workspace and rolls back", async () => {
+    const runner = new ScriptedRunner(async (request) => {
+      emit(request, {
+        type: "item.completed",
+        item: {
+          id: "f1",
+          type: "file_change",
+          changes: [{ path: "/etc/cron.d/evil", kind: "add" }],
+        },
+      });
+    });
+    const service = await makeService(runner);
+    const agent = await service.createAgent({ name: "Writer" });
+    const { run } = await service.sendMessage(agent.id, "add a test");
+    await expect.poll(() => service.getRun(run.id).status).toBe("blocked");
+    expect(service.getRun(run.id).containment).toMatchObject({
+      clause: "scope.writePaths",
+      rolledBack: true,
+    });
+  });
+
+  it("expires a warrant that is approved after its TTL has elapsed", async () => {
+    const service = await makeService(new FakeRunner(), {
+      WARRANT_AUTO_APPROVE: "false",
+    });
+    const agent = await service.createAgent({ name: "Writer" });
+    const { run, warrant } = await service.sendMessage(agent.id, "add a test");
+
+    // Force the stored warrant to look expired.
+    await service["store"].mutate((database: any) => {
+      const w = database.warrants.find((item: any) => item.id === warrant.id);
+      w.expiresAt = new Date(Date.now() - 1000).toISOString();
+    });
+
+    const decided = await service.decideWarrant(warrant.id, true);
+    expect(decided.warrant.status).toBe("expired");
+    expect(service.getRun(run.id).status).toBe("cancelled");
+    expect(service.getAgent(agent.id).status).toBe("ready");
+  });
+
+  it("refuses to approve a warrant for a stopped Agent", async () => {
+    const service = await makeService(new FakeRunner(), {
+      WARRANT_AUTO_APPROVE: "false",
+    });
+    const agent = await service.createAgent({ name: "Writer" });
+    const { warrant } = await service.sendMessage(agent.id, "add a test");
+    await service.stopAgent(agent.id);
+    await expect(service.decideWarrant(warrant.id, true)).rejects.toMatchObject({
+      statusCode: 409,
+    });
+  });
+
   it("revokes a pending warrant and cancels its run", async () => {
     const service = await makeService(new FakeRunner(), {
       WARRANT_AUTO_APPROVE: "false",

@@ -253,6 +253,17 @@ rollback path; only process/container spawning is substituted.
 
 ## Limitations and residual risk
 
+- **Enforcement is containment, not syscall interception.** Warrant observes
+  the Codex event stream: commands are judged at `item.started` and the container
+  is killed on violation, but a very fast side effect can land before teardown
+  and is then recovered by rollback rather than prevented outright. File writes
+  are always caught at report time and undone.
+- **The allow-list constrains which programs run, not every effect.** A
+  name-based allow-list cannot fully bound an interpreter, so it is backed by
+  secret-reference scanning, network-binary denial, inline-eval (`node -e`,
+  `python -c`) blocking, and file-write checks that apply no matter which command
+  produced the write. A warranted binary can still take a permitted-but-unintended
+  action inside its scope.
 - **The compiler is advisory, the enforcement is not.** A poorly compiled
   warrant can be too permissive. The human approval step and the deterministic
   fallback floor exist for exactly this reason, and the operator sees the full

@@ -33,6 +33,7 @@ export class ConformanceMonitor implements RunObserver {
     private readonly runId: string,
     private readonly workspaceRoots: string[],
     private readonly clock: () => Date = () => new Date(),
+    private readonly liveStatus: () => Warrant["status"] = () => warrant.status,
   ) {}
 
   get violation(): WarrantViolation | null {
@@ -70,12 +71,11 @@ export class ConformanceMonitor implements RunObserver {
 
   private inspect(action: AgentAction): void {
     if (this.violationState) return;
-    const decision = evaluateAction(
-      action,
-      this.warrant,
-      this.usage,
-      this.clock(),
-    );
+    // Re-read the warrant status from the source of truth so a revocation or
+    // expiry that lands mid-run is enforced on the next action, not just by the
+    // container teardown.
+    const current: Warrant = { ...this.warrant, status: this.liveStatus() };
+    const decision = evaluateAction(action, current, this.usage, this.clock());
     const blocked = decision.verdict === "block";
     this.push(
       action.kind,

@@ -164,6 +164,35 @@ describe("evaluateAction: commands", () => {
   });
 });
 
+describe("evaluateAction: inline interpreter code", () => {
+  it("blocks node -e even when node is warranted", () => {
+    const decision = evaluateAction(
+      command('node -e "require(\'fs\').readFileSync(0)"'),
+      makeWarrant({ commands: ["npm", "node"] }),
+      emptyUsage(),
+    );
+    expect(decision.verdict).toBe("block");
+    expect(decision.clause).toBe("scope.inlineCode");
+  });
+
+  it("blocks python3 -c inline code", () => {
+    const decision = evaluateAction(
+      command("python3 -c 'import os'"),
+      makeWarrant({ commands: ["python3"] }),
+      emptyUsage(),
+    );
+    expect(decision.verdict).toBe("block");
+    expect(decision.clause).toBe("scope.inlineCode");
+  });
+
+  it("still allows running an interpreter on a real file", () => {
+    expect(
+      evaluateAction(command("node build.js"), makeWarrant({ commands: ["node"] }), emptyUsage())
+        .verdict,
+    ).toBe("allow");
+  });
+});
+
 describe("evaluateAction: file changes", () => {
   it("allows writes inside the warranted globs", () => {
     expect(

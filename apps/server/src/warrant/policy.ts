@@ -11,6 +11,15 @@ const SUBSTITUTIONS = /\$\(([^)]*)\)|`([^`]*)`/g;
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const SHELL_BINARIES = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 const SHELL_COMMAND_FLAG = /^-[a-z]*c$/;
+const INLINE_EVAL_BINARIES = new Set([
+  "node",
+  "python",
+  "python3",
+  "ruby",
+  "perl",
+  "php",
+]);
+const INLINE_EVAL_FLAGS = new Set(["-e", "-c", "--eval", "--exec", "-E"]);
 
 const NETWORK_BINARIES = new Set([
   "curl",
@@ -105,6 +114,12 @@ export function commandBinary(segment: string): string {
   return binary.replace(/\\/g, "/").split("/").pop() ?? "";
 }
 
+function runsInlineCode(segment: string, binary: string): boolean {
+  if (!INLINE_EVAL_BINARIES.has(binary)) return false;
+  const tokens = segment.split(/\s+/).slice(1);
+  return tokens.some((token) => INLINE_EVAL_FLAGS.has(token));
+}
+
 function referencesSecret(segment: string): boolean {
   return SECRET_REFERENCES.some((pattern) => pattern.test(segment));
 }
@@ -165,6 +180,12 @@ function evaluateCommand(
       return block(
         "scope.secretHandling",
         "Segment '" + segment + "' dumps the process environment",
+      );
+    }
+    if (runsInlineCode(segment, binary)) {
+      return block(
+        "scope.inlineCode",
+        "Command '" + binary + "' runs inline code, which bypasses per-action inspection",
       );
     }
     if (scope.denyCommands.includes(binary)) {

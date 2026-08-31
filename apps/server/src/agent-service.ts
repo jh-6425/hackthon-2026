@@ -283,7 +283,32 @@ export class AgentService {
       if (!run) {
         throw new HttpError(404, "No run is attached to this warrant");
       }
+      if (run.status !== "awaiting-warrant") {
+        throw new HttpError(409, "This run is no longer awaiting a warrant");
+      }
       const agent = database.agents.find((item) => item.id === warrant.agentId);
+      const expired = Date.parse(warrant.expiresAt) <= Date.parse(timestamp);
+      if (approve && expired) {
+        // Approving a warrant whose TTL already elapsed would launch a run the
+        // monitor blocks on its first action; expire it cleanly instead.
+        warrant.status = "expired";
+        warrant.decidedAt = timestamp;
+        run.status = "cancelled";
+        run.error = "The execution warrant expired before it was approved";
+        run.completedAt = timestamp;
+        if (agent && agent.status !== "stopped") {
+          agent.status = "ready";
+          agent.updatedAt = timestamp;
+        }
+        return {
+          warrant: structuredClone(warrant),
+          run: structuredClone(run),
+          agent: null,
+        };
+      }
+      if (approve && agent && agent.status === "stopped") {
+        throw new HttpError(409, "Start the Agent before approving this warrant");
+      }
       warrant.status = approve ? "approved" : "rejected";
       warrant.decidedAt = timestamp;
       if (approve) {
@@ -385,11 +410,36 @@ export class AgentService {
       }
     });
 
-    const monitor = new ConformanceMonitor(warrant, run.id, [
-      agentAtStart.workspacePath,
-      "/workspace",
-    ]);
+    const monitor = new ConformanceMonitor(
+      warrant,
+      run.id,
+      [agentAtStart.workspacePath, "/workspace"],
+      () => new Date(),
+      () =>
+        this.store.snapshot().warrants.find((item) => item.id === warrant.id)
+          ?.status ?? warrant.status,
+    );
     const snapshot = await this.captureSnapshot(agentAtStart, run.id);
+    if (!snapshot) {
+      // Fail closed: without a pre-run snapshot there is no rollback safety net,
+      // so the run must not proceed.
+      const failedAt = now();
+      await this.store.mutate((database) => {
+        const storedRun = database.runs.find((item) => item.id === run.id);
+        const agent = database.agents.find((item) => item.id === agentAtStart.id);
+        if (storedRun) {
+          storedRun.status = "failed";
+          storedRun.error = "Could not capture a workspace snapshot; run refused to protect the workspace";
+          storedRun.completedAt = failedAt;
+        }
+        if (agent && agent.status !== "stopped") {
+          agent.status = "error";
+          agent.lastError = "Warrant could not snapshot the workspace before running";
+          agent.updatedAt = failedAt;
+        }
+      });
+      return;
+    }
 
     try {
       if (this.cancellationRequests.has(agentAtStart.id)) {
@@ -403,7 +453,7 @@ export class AgentService {
         observer: monitor,
       });
       await this.persistSpans(monitor.spans);
-      await snapshot?.discard();
+      await snapshot.discard();
       const completedAt = now();
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
@@ -433,7 +483,7 @@ export class AgentService {
       const message = error instanceof Error ? error.message : String(error);
       const containment = violation ? await this.contain(violation, snapshot) : null;
       await this.persistSpans(monitor.spans);
-      if (!violation) await snapshot?.discard();
+      if (!violation) await snapshot.discard();
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);

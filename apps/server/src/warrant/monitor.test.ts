@@ -94,6 +94,23 @@ describe("ConformanceMonitor", () => {
     expect(subject.spans).toHaveLength(1);
   });
 
+  it("blocks the next action once the live warrant status turns revoked", () => {
+    let status: Warrant["status"] = "approved";
+    const subject = new ConformanceMonitor(
+      warrant,
+      "run-1",
+      ["/workspace"],
+      () => new Date(),
+      () => status,
+    );
+    subject.observe(started("c1", { type: "command_execution", command: "npm test" }));
+    expect(subject.violation).toBeNull();
+
+    status = "revoked";
+    subject.observe(started("c2", { type: "command_execution", command: "npm run build" }));
+    expect(subject.violation?.decision.clause).toBe("warrant.status");
+  });
+
   it("ignores events that carry no warranted action", () => {
     const subject = monitor();
     subject.observe({ type: "thread.started", thread_id: "t1" });

@@ -88,6 +88,7 @@ Deny-first. The first matching rule wins.
 | 2 | `warrant.expiresAt` | Warrant TTL has elapsed. |
 | 3 | `scope.maxCommands` / `scope.maxFileWrites` | Run budget exhausted. |
 | 4 | `scope.secretHandling` | Segment references a protected credential or dumps the environment. |
+| 4b | `scope.inlineCode` | An interpreter (`node`, `python3`, …) is invoked with an inline-eval flag (`-e`, `-c`), which would run code the per-action checks cannot see. |
 | 5 | `scope.denyCommands` | Binary is on the explicit deny list. |
 | 6 | `scope.networkEgress` | Network binary or web tool without granted egress. |
 | 7 | `scope.commands` | Binary is outside the warranted command set. |
@@ -109,6 +110,8 @@ from the binary. **Every segment must pass independently.**
 | Command chaining to smuggle an action | Per-segment evaluation of shell operators and substitutions | Deeply obfuscated encodings (for example base64 piped to a shell) are only caught if the decoder binary is unwarranted |
 | Workspace tampering | Pre-run snapshot; rollback with digest verification on violation | Writes are reported after they land, so recovery is rollback rather than prevention |
 | Network egress | Denied by default; network binaries and web tools blocked without an explicit grant | The container still has a bridge network; enforcement is at the action layer, not the packet layer |
+| Allow-listed binary running arbitrary effect | Name-based allow-listing is backed by secret-reference scanning, network-binary denial, inline-eval blocking, and file_change checks that apply regardless of which command produced the write | A warranted binary can still take permitted-but-unintended actions within scope; the allow-list constrains *which programs*, not every *effect* |
+| Action already executed when observed | Commands are evaluated at `item.started`, before the model reports completion, and the container is torn down on violation; file writes are caught at report time and undone by rollback | This is containment (abort + rollback), not syscall-level pre-execution prevention; a fast side effect can land before teardown and is recovered rather than prevented |
 
 ## Files
 

@@ -25,10 +25,20 @@ export function extractItem(event: Record<string, unknown>): RuntimeItem | null 
 export function relativizePath(candidate: string, workspaceRoots: string[]): string {
   const normalized = candidate.replace(/\\/g, "/");
   for (const root of workspaceRoots) {
-    const prefix = root.replace(/\\/g, "/").replace(/\/+$/, "") + "/";
-    if (normalized.startsWith(prefix)) {
-      return normalizePath(normalized.slice(prefix.length));
+    const base = root.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (normalized.startsWith(base + "/")) {
+      return normalizePath(normalized.slice(base.length + 1));
     }
+    if (normalized === base) {
+      // A write to the workspace root itself is treated as an escape.
+      return normalized;
+    }
+  }
+  // An absolute path outside every workspace root must stay absolute so the
+  // downstream workspace-escape check rejects it, instead of normalizePath
+  // stripping the leading slash and disguising it as an in-workspace path.
+  if (normalized.startsWith("/") || /^[a-zA-Z]:/.test(normalized)) {
+    return normalized;
   }
   return normalizePath(normalized);
 }
