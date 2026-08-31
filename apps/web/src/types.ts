@@ -79,6 +79,8 @@ export interface Agent {
   workspacePath: string;
   codexThreadId: string | null;
   lastError: string | null;
+  quarantined: boolean;
+  quarantineReason: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -106,6 +108,7 @@ export interface AgentRun {
   } | null;
   warrantId: string | null;
   containment: RunContainment | null;
+  diagnostics: { outOfBandPaths: string[] } | null;
   createdAt: string;
 }
 

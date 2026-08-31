@@ -25,6 +25,8 @@ export interface Agent {
   workspacePath: string;
   codexThreadId: string | null;
   lastError: string | null;
+  quarantined: boolean;
+  quarantineReason: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -54,6 +56,7 @@ export interface AgentRun {
   usage: RunUsage | null;
   warrantId: string | null;
   containment: RunContainment | null;
+  diagnostics: RunDiagnostics | null;
   startedAt: string | null;
   completedAt: string | null;
   createdAt: string;
@@ -94,8 +97,18 @@ export interface RunnerRequest {
   observer?: RunObserver | undefined;
 }
 
+export interface RunDiagnostics {
+  // In-scope, within-budget writes that were not reported as file_change events.
+  outOfBandPaths: string[];
+}
+
 export interface AgentRunner {
   run(request: RunnerRequest): Promise<RunnerResult>;
   cancel(agentId: string): Promise<boolean>;
   isAvailable(): Promise<boolean>;
+  // Optional: resolves only once every child process / background task the run
+  // spawned has terminated. Finalization awaits this before reconciling so a
+  // post-return write cannot escape the safety check. Runners that fully await
+  // their work (the container and replay runners) may omit it.
+  settled?(agentId: string): Promise<void>;
 }

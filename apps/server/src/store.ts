@@ -11,10 +11,21 @@ const emptyDatabase = (): Database => ({
   spans: [],
 });
 
+const withAgentDefaults = (a: any) => ({
+  quarantined: false,
+  quarantineReason: null,
+  ...a,
+});
+const withRunDefaults = (r: any) => ({
+  containment: null,
+  diagnostics: null,
+  ...r,
+});
 const withDefaults = (parsed: Database): Database => ({
   ...parsed,
+  agents: (parsed.agents ?? []).map(withAgentDefaults),
   messages: parsed.messages ?? [],
-  runs: parsed.runs ?? [],
+  runs: (parsed.runs ?? []).map(withRunDefaults),
   warrants: parsed.warrants ?? [],
   spans: parsed.spans ?? [],
 });

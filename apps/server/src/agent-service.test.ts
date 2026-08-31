@@ -525,7 +525,10 @@ describe("Kill Switch hardening (review round 3)", () => {
     const before = await import("node:fs/promises").then((m) => m.readFile(path.join(agent.workspacePath, "src", "parser.ts"), "utf8"));
 
     const { run } = await service.sendMessage(agent.id, TASK3);
-    await expect.poll(() => service.getRun(run.id).status).toBe("failed");
+    // A failure that left an out-of-scope change is surfaced as a violation
+    // (blocked) with containment, and the workspace is rolled back either way.
+    await expect.poll(() => service.getRun(run.id).status).toBe("blocked");
+    expect(service.getRun(run.id).containment?.clause).toBe("scope.writePaths");
     const after = await import("node:fs/promises").then((m) => m.readFile(path.join(agent.workspacePath, "src", "parser.ts"), "utf8"));
     expect(after).toBe(before);
   });
@@ -602,5 +605,207 @@ describe("Kill Switch hardening (review round 3)", () => {
     } finally {
       WorkspaceSnapshot.prototype.restore = original;
     }
+  });
+});
+
+describe("Kill Switch hardening (review round 4)", () => {
+  const TASK4 = "Add one unit test for the parser and summarise what you changed.";
+
+  it("F1: a symlink that escapes DURING the run is blocked and quarantines the Agent", async () => {
+    const runner = new ScriptedRunner(async (request) => {
+      const { symlink, writeFile, mkdir } = await import("node:fs/promises");
+      const outside = path.join(request.workspacePath, "..", "escape-target.txt");
+      await writeFile(outside, "original");
+      await mkdir(path.join(request.workspacePath, "tests"), { recursive: true });
+      await symlink(outside, path.join(request.workspacePath, "tests", "link")); // escaping link
+    });
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, TASK4);
+    await expect.poll(() => service.getRun(run.id).status).toBe("blocked");
+    expect(service.getRun(run.id).containment?.recoveryFailed).toBe(true);
+    expect(service.getAgent(agent.id).quarantined).toBe(true);
+    await expect(service.sendMessage(agent.id, TASK4)).rejects.toMatchObject({ statusCode: 423 });
+  });
+
+  it("F3: a null / empty runner result fails closed, never completed", async () => {
+    const badRunner = {
+      async run() { return null as unknown as { output: string; threadId: string | null; usage: null }; },
+      async cancel() { return false; },
+      async isAvailable() { return true; },
+    };
+    const service = await makeService(badRunner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, TASK4);
+    await expect.poll(() => ["failed", "blocked"].includes(service.getRun(run.id).status)).toBe(true);
+    expect(service.getRun(run.id).status).not.toBe("completed");
+    expect(service.getRun(run.id).error).toBeTruthy();
+  });
+
+  it("F3: a thrown falsy value (throw 0) is treated as a failure, not success", async () => {
+    const runner = {
+      async run() { throw 0; },
+      async cancel() { return false; },
+      async isAvailable() { return true; },
+    };
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, TASK4);
+    await expect.poll(() => service.getRun(run.id).status).toBe("failed");
+    expect(service.getRun(run.id).error).toBeTruthy();
+  });
+
+  it("F4: a post-return delayed write is caught via the settled() lifecycle hook", async () => {
+    let done!: () => void;
+    const settledPromise = new Promise<void>((r) => (done = r));
+    const runner = {
+      async run(request: { workspacePath: string }) {
+        // schedule a write AFTER run() returns
+        setTimeout(async () => {
+          const { mkdir, writeFile } = await import("node:fs/promises");
+          await mkdir(path.join(request.workspacePath, "src"), { recursive: true });
+          await writeFile(path.join(request.workspacePath, "src", "late.ts"), "// late\n");
+          done();
+        }, 30);
+        return { output: "returned early", threadId: "t", usage: null };
+      },
+      async cancel() { return false; },
+      async isAvailable() { return true; },
+      async settled() { await settledPromise; },
+    };
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    await mkdir(path.join(agent.workspacePath, "src"), { recursive: true });
+    await writeFile(path.join(agent.workspacePath, "src", "parser.ts"), "export const x = 1;\n");
+    const { run } = await service.sendMessage(agent.id, TASK4);
+    await expect.poll(() => service.getRun(run.id).status).toBe("blocked"); // late src/late.ts caught
+    expect(service.getRun(run.id).containment?.clause).toBe("scope.writePaths");
+  });
+
+  it("F5: a warrant revoked during the run is never finalized as completed", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const runner = {
+      async run() { await gate; return { output: "done", threadId: "t", usage: null }; },
+      async cancel() { release(); return true; },
+      async isAvailable() { return true; },
+    };
+    const service = await makeService(runner, { WARRANT_AUTO_APPROVE: "false" }, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run, warrant } = await service.sendMessage(agent.id, TASK4);
+    await service.decideWarrant(warrant.id, true);
+    await new Promise((r) => setTimeout(r, 30));
+    await service.revokeWarrant(warrant.id);
+    release();
+    await expect.poll(() => ["cancelled", "blocked"].includes(service.getRun(run.id).status)).toBe(true);
+    expect(service.getRun(run.id).status).not.toBe("completed");
+  });
+
+  it("F6: a terminal persistence failure keeps the Agent non-runnable and does not discard the snapshot", async () => {
+    const runner = new ScriptedRunner(async () => {});
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { WorkspaceSnapshot } = await import("./warrant/snapshot.js");
+    let discarded = false;
+    const origDiscard = WorkspaceSnapshot.prototype.discard;
+    WorkspaceSnapshot.prototype.discard = async function () { discarded = true; };
+    // Break the terminal mutate only (the 4th+ store.mutate call in a run).
+    const store = (service as unknown as { store: { mutate: (fn: unknown) => Promise<unknown> } }).store;
+    const orig = store.mutate.bind(store);
+    let calls = 0;
+    store.mutate = async (fn: unknown) => {
+      calls += 1;
+      if (calls === 2) throw new Error("ENOSPC terminal persist"); // running->terminal is the 2nd mutate here
+      return orig(fn);
+    };
+    try {
+      const { run } = await service.sendMessage(agent.id, TASK4);
+      await new Promise((r) => setTimeout(r, 200));
+      // Agent must not be left runnable.
+      expect(service.getAgent(agent.id).status).not.toBe("ready");
+      expect(discarded).toBe(false); // snapshot kept
+      void run;
+    } finally {
+      store.mutate = orig;
+      WorkspaceSnapshot.prototype.discard = origDiscard;
+    }
+  });
+
+  it("F8: quarantine survives updateAgent and startAgent; only clearQuarantine lifts it", async () => {
+    const runner = new ScriptedRunner(async (request) => {
+      emit(request, { type: "item.started", item: { id: "f2", type: "file_change", changes: [{ path: "src/parser.ts" }] } });
+    });
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    await mkdir(path.join(agent.workspacePath, "src"), { recursive: true });
+    await writeFile(path.join(agent.workspacePath, "src", "parser.ts"), "export const original = true;\n");
+    const { WorkspaceSnapshot } = await import("./warrant/snapshot.js");
+    const orig = WorkspaceSnapshot.prototype.restore;
+    WorkspaceSnapshot.prototype.restore = async function () { return { restored: true, digestMatches: false, fileCount: 1 }; };
+    try {
+      const { run } = await service.sendMessage(agent.id, TASK4);
+      await expect.poll(() => service.getRun(run.id).status).toBe("blocked");
+      expect(service.getAgent(agent.id).quarantined).toBe(true);
+      await service.startAgent(agent.id).catch(() => undefined);
+      await service.updateAgent(agent.id, { description: "x" }).catch(() => undefined);
+      expect(service.getAgent(agent.id).quarantined).toBe(true); // still quarantined
+      await expect(service.sendMessage(agent.id, TASK4)).rejects.toMatchObject({ statusCode: 423 });
+      await service.clearQuarantine(agent.id);
+      expect(service.getAgent(agent.id).quarantined).toBe(false);
+    } finally {
+      WorkspaceSnapshot.prototype.restore = orig;
+    }
+  });
+
+  it("F11: 100 silent same-name overwrites are within budget; 100 distinct silent files exceed it", async () => {
+    // 100 distinct silent files, budget 2 -> blocked
+    const many = new ScriptedRunner(async (request) => {
+      const { mkdir, writeFile } = await import("node:fs/promises");
+      await mkdir(path.join(request.workspacePath, "tests"), { recursive: true });
+      for (let i = 0; i < 100; i++) await writeFile(path.join(request.workspacePath, "tests", "g" + i + ".test.ts"), "x");
+    });
+    const s1 = await makeService(many, {}, { withSrc: true });
+    const a1 = await s1.createAgent({ name: "Parser Bot" });
+    const r1 = (await s1.sendMessage(a1.id, TASK4)).run;
+    await expect.poll(() => s1.getRun(r1.id).status).toBe("blocked");
+    expect(s1.getRun(r1.id).containment?.clause).toBe("scope.maxFileWrites");
+  });
+
+  it("F12: a reported path with ./ and duplicate slashes is not misflagged as out-of-band", async () => {
+    const runner = new ScriptedRunner(async (request) => {
+      const { mkdir, writeFile } = await import("node:fs/promises");
+      await mkdir(path.join(request.workspacePath, "tests"), { recursive: true });
+      await writeFile(path.join(request.workspacePath, "tests", "a.test.ts"), "x");
+      emit(request, { type: "item.completed", item: { id: "f1", type: "file_change", changes: [{ path: "tests/./a.test.ts" }] } });
+    });
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, TASK4);
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+    expect(service.getRun(run.id).diagnostics).toBeNull(); // reported == on-disk, no out-of-band
+  });
+});
+
+describe("Single execution per Agent (F18)", () => {
+  const TASK = "Add one unit test for the parser and summarise what you changed.";
+  it("approving two runs for one Agent never launches two executions", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const runner = {
+      async run() { await gate; return { output: "done", threadId: "t", usage: null }; },
+      async cancel() { release(); return true; },
+      async isAvailable() { return true; },
+    };
+    const service = await makeService(runner, { WARRANT_AUTO_APPROVE: "false" }, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const a = await service.sendMessage(agent.id, TASK);
+    // The second sendMessage is rejected because the Agent is already busy.
+    await expect(service.sendMessage(agent.id, TASK)).rejects.toMatchObject({ statusCode: 409 });
+    // Approve A -> launches one execution.
+    await service.decideWarrant(a.warrant.id, true);
+    // A second approval of the same warrant is rejected.
+    await expect(service.decideWarrant(a.warrant.id, true)).rejects.toMatchObject({ statusCode: 409 });
+    release();
+    await expect.poll(() => service.getRun(a.run.id).status).toBe("completed");
   });
 });

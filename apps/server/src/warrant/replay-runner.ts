@@ -155,29 +155,50 @@ export class ReplayRunner implements AgentRunner {
       throw new Error("Replay write escapes the workspace: " + write.path);
     }
 
-    // Physical containment of the PARENT: resolve symlinks on the deepest existing
-    // ancestor so a `tests -> /tmp/outside` directory link cannot smuggle a write
-    // out of the tree.
-    const realParent = await realpathAncestor(path.dirname(target));
-    if (escapes(realRoot, realParent)) {
-      throw new Error("Replay write escapes the workspace via a symlink: " + write.path);
-    }
-
-    // Physical containment of the TARGET ITSELF: if it already exists as a
-    // symlink, its real location must be inside the workspace, otherwise writing
-    // through it would overwrite an external file (e.g. tests/out.txt -> /tmp/x).
-    const existing = await lstat(target).catch(() => null);
-    if (existing?.isSymbolicLink()) {
-      const realTarget = await realpath(target).catch(() => null);
-      if (!realTarget || escapes(realRoot, realTarget)) {
-        throw new Error("Replay write escapes the workspace via a symlink: " + write.path);
+    // Per-component containment (finding 13): every intermediate path component,
+    // from the workspace root down to the parent, must be a real directory — not
+    // a symlink — so an intermediate symlink cannot redirect the write out of the
+    // tree. Node has no openat(), so a concurrent adversarial swap of a component
+    // between this check and the open remains a residual TOCTOU; we minimise the
+    // window and fail closed on any anomaly rather than claim guarantees we can't
+    // provide. (In practice the replay runner writes are non-adversarial fixtures;
+    // the real runner writes inside a container whose mount is reconciled.)
+    const parts = relative.split(path.sep);
+    let walk = realRoot;
+    for (let i = 0; i < parts.length - 1; i++) {
+      walk = path.join(walk, parts[i] as string);
+      let info;
+      try {
+        info = await lstat(walk);
+      } catch (error) {
+        if (isENOENT(error)) break; // remaining components will be created by mkdir
+        throw new Error("Replay write path could not be verified: " + write.path);
+      }
+      if (info.isSymbolicLink()) {
+        throw new Error("Replay write escapes the workspace via an intermediate symlink: " + write.path);
       }
     }
 
+    // Final-component containment: writes never follow a symlink final component.
+    // If the target already exists as a symlink, refuse (consistent with snapshot
+    // treating symlinks as tracked entries, never as write-through channels).
+    let existing;
+    try {
+      existing = await lstat(target);
+    } catch (error) {
+      if (!isENOENT(error)) {
+        // EACCES / EIO / ELOOP must not be swallowed like ENOENT.
+        throw new Error("Replay write target could not be verified: " + write.path);
+      }
+      existing = null;
+    }
+    if (existing?.isSymbolicLink()) {
+      throw new Error("Replay write refuses to follow a symlink target: " + write.path);
+    }
+
     await mkdir(path.dirname(target), { recursive: true });
-    // O_NOFOLLOW closes the TOCTOU window: if the final component is (or becomes)
-    // a symlink between the check and the open, the open fails instead of
-    // following it out of the workspace.
+    // O_NOFOLLOW closes the final-component TOCTOU window: if it is (or becomes) a
+    // symlink between the check and the open, the open fails instead of following.
     const handle = await open(target, FS.O_WRONLY | FS.O_CREAT | FS.O_TRUNC | FS.O_NOFOLLOW);
     try {
       await handle.writeFile(write.content);
@@ -187,24 +208,7 @@ export class ReplayRunner implements AgentRunner {
   }
 }
 
-/** True when `target` (already real) is not inside real `root`. */
-function escapes(realRoot: string, target: string): boolean {
-  const rel = path.relative(realRoot, target);
-  return rel !== "" && (rel.split(path.sep)[0] === ".." || path.isAbsolute(rel));
-}
-
-/** realpath of the deepest ancestor of `p` that actually exists. */
-async function realpathAncestor(p: string): Promise<string> {
-  let current = p;
-  // Walk up until a component resolves.
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    try {
-      return await realpath(current);
-    } catch {
-      const parent = path.dirname(current);
-      if (parent === current) return current;
-      current = parent;
-    }
-  }
+function isENOENT(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error &&
+    (error as { code?: unknown }).code === "ENOENT";
 }

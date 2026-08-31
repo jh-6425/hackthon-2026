@@ -204,3 +204,43 @@ describe("ReplayRunner final-target symlink (P0-1)", () => {
     expect(await readFile(outside, "utf8")).toBe("original");
   });
 });
+
+describe("ReplayRunner per-component + internal symlink (F13/F14)", () => {
+  it("F13: refuses a write whose intermediate directory is a symlink to outside", async () => {
+    const ws = await workspace(false);
+    const outsideDir = path.join(ws, "..", "outdir");
+    await mkdir(outsideDir, { recursive: true });
+    await rm(path.join(ws, "tests"), { recursive: true, force: true });
+    await symlink(outsideDir, path.join(ws, "tests")); // tests -> ../outdir
+    const file = await singleScenario(ws, [
+      {
+        __write: { path: "tests/sub/file.ts", content: "x" },
+        type: "item.completed",
+        item: { id: "f1", type: "file_change", changes: [{ path: "tests/sub/file.ts" }] },
+      },
+    ]);
+    roots.push(file);
+    await expect(
+      new ReplayRunner(file).run(req(ws, TASK, new ConformanceMonitor(warrant(), "r1", [ws]))),
+    ).rejects.toThrow(/symlink/);
+  });
+
+  it("F14: refuses to write through an internal symlink final component (consistent semantics)", async () => {
+    const ws = await workspace(false);
+    await mkdir(path.join(ws, "tests"), { recursive: true });
+    await writeFile(path.join(ws, "tests", "real.ts"), "real");
+    await symlink("real.ts", path.join(ws, "tests", "link.ts")); // internal symlink
+    const file = await singleScenario(ws, [
+      {
+        __write: { path: "tests/link.ts", content: "via link" },
+        type: "item.completed",
+        item: { id: "f1", type: "file_change", changes: [{ path: "tests/link.ts" }] },
+      },
+    ]);
+    roots.push(file);
+    await expect(
+      new ReplayRunner(file).run(req(ws, TASK, new ConformanceMonitor({ ...warrant(), scope: { ...warrant().scope, writePaths: ["**"] } }, "r1", [ws]))),
+    ).rejects.toThrow(/symlink/);
+    expect(await readFile(path.join(ws, "tests", "real.ts"), "utf8")).toBe("real"); // untouched
+  });
+});
