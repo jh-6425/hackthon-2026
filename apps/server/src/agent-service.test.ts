@@ -782,7 +782,7 @@ describe("Kill Switch hardening (review round 4)", () => {
     const agent = await service.createAgent({ name: "Parser Bot" });
     const { run } = await service.sendMessage(agent.id, TASK4);
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
-    expect(service.getRun(run.id).diagnostics).toBeNull(); // reported == on-disk, no out-of-band
+    expect(service.getRun(run.id).diagnostics?.outOfBandPaths).toEqual([]); // reported == on-disk
   });
 });
 
@@ -807,5 +807,73 @@ describe("Single execution per Agent (F18)", () => {
     await expect(service.decideWarrant(a.warrant.id, true)).rejects.toMatchObject({ statusCode: 409 });
     release();
     await expect.poll(() => service.getRun(a.run.id).status).toBe("completed");
+  });
+});
+
+describe("Kill Switch hardening (review round 5 — bounded)", () => {
+  const T = "Add one unit test for the parser and summarise what you changed.";
+
+  it("R5-6: a silent write on top of an already-spent reported budget is blocked", async () => {
+    // testsOnlyCompiler grants maxFileWrites=2. Report+write a.ts and b.ts
+    // (budget spent), then silently write c.ts -> reported(2)+outOfBand(1) > 2.
+    const runner = new ScriptedRunner(async (request) => {
+      const { mkdir, writeFile } = await import("node:fs/promises");
+      await mkdir(path.join(request.workspacePath, "tests"), { recursive: true });
+      await writeFile(path.join(request.workspacePath, "tests", "a.ts"), "a");
+      emit(request, { type: "item.completed", item: { id: "f1", type: "file_change", changes: [{ path: "tests/a.ts" }] } });
+      await writeFile(path.join(request.workspacePath, "tests", "b.ts"), "b");
+      emit(request, { type: "item.completed", item: { id: "f2", type: "file_change", changes: [{ path: "tests/b.ts" }] } });
+      await writeFile(path.join(request.workspacePath, "tests", "c.ts"), "c"); // silent
+    });
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, T);
+    await expect.poll(() => service.getRun(run.id).status).toBe("blocked");
+    expect(service.getRun(run.id).containment?.clause).toBe("scope.maxFileWrites");
+  });
+
+  it("R5-19: a failure whose recovery ALSO fails records both reasons and quarantines", async () => {
+    const runner = { async run() { throw new Error("model failed"); }, async cancel() { return false; }, async isAvailable() { return true; } };
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { WorkspaceSnapshot } = await import("./warrant/snapshot.js");
+    const orig = WorkspaceSnapshot.prototype.restore;
+    WorkspaceSnapshot.prototype.restore = async function () { throw new Error("ENOSPC restore"); };
+    try {
+      const { run } = await service.sendMessage(agent.id, T);
+      await expect.poll(() => ["failed", "blocked"].includes(service.getRun(run.id).status)).toBe(true);
+      const r = service.getRun(run.id);
+      expect(r.error).toContain("model failed");
+      expect(r.error).toContain("ENOSPC restore"); // distinct recovery reason
+      expect(service.getAgent(agent.id).quarantined).toBe(true);
+    } finally {
+      WorkspaceSnapshot.prototype.restore = orig;
+    }
+  });
+
+  it("R5-20: a blocked run records full changed/out-of-band/stray evidence", async () => {
+    const runner = new ScriptedRunner(async (request) => {
+      const { mkdir, writeFile } = await import("node:fs/promises");
+      await mkdir(path.join(request.workspacePath, "tests"), { recursive: true });
+      await mkdir(path.join(request.workspacePath, "src"), { recursive: true });
+      await writeFile(path.join(request.workspacePath, "tests", "a.ts"), "a"); // in-scope silent
+      await writeFile(path.join(request.workspacePath, "src", "b.ts"), "b");   // out-of-scope silent
+    });
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, T);
+    await expect.poll(() => service.getRun(run.id).status).toBe("blocked");
+    const d = service.getRun(run.id).diagnostics!;
+    expect(d.changedPaths).toEqual(expect.arrayContaining(["src/b.ts", "tests/a.ts"]));
+    expect(d.strayPaths).toContain("src/b.ts");
+    expect(d.outOfBandPaths).toEqual(expect.arrayContaining(["src/b.ts", "tests/a.ts"]));
+  });
+
+  it("R5-21: a malformed usage (Infinity token count) fails closed", async () => {
+    const runner = { async run() { return { output: "ok", threadId: "t", usage: { outputTokens: Infinity } }; }, async cancel() { return false; }, async isAvailable() { return true; } };
+    const service = await makeService(runner, {}, { withSrc: true });
+    const agent = await service.createAgent({ name: "Parser Bot" });
+    const { run } = await service.sendMessage(agent.id, T);
+    await expect.poll(() => service.getRun(run.id).status).toBe("failed");
   });
 });

@@ -10,6 +10,7 @@ import type {
   AgentRunner,
   CreateAgentInput,
   Message,
+  RunDiagnostics,
   RunnerResult,
   UpdateAgentInput,
 } from "./types.js";
@@ -20,7 +21,7 @@ import {
 } from "./warrant/compiler.js";
 import { ConformanceMonitor } from "./warrant/monitor.js";
 import { WorkspaceSnapshot, changedPaths, digestFileAt } from "./warrant/snapshot.js";
-import { matchesAny } from "./warrant/glob.js";
+import { canonicalizePath, matchesAny } from "./warrant/glob.js";
 import type { AgentAction, PolicyDecision } from "./warrant/types.js";
 import type {
   RunContainment,
@@ -48,35 +49,47 @@ function describeStray(stray: { paths: string[] }): string {
   return stray.paths.join(", ");
 }
 
-function isValidResult(value: unknown): value is RunnerResult {
-  if (typeof value !== "object" || value === null) return false;
-  const r = value as Record<string, unknown>;
+/** Never throws, even on a hostile Symbol.toPrimitive / getter. */
+export function safeErrorMessage(error: unknown): string {
+  try {
+    if (error instanceof Error && typeof error.message === "string") return error.message;
+    if (typeof error === "string") return error;
+    if (typeof error === "number" || typeof error === "boolean") return String(error);
+    if (error === null) return "null error";
+    if (error === undefined) return "unknown error";
+    return "non-standard error value";
+  } catch {
+    return "unformattable error";
+  }
+}
+
+function isSafeTokenCount(value: unknown): boolean {
   return (
-    typeof r.output === "string" &&
-    r.output.trim().length > 0 &&
-    (r.threadId === null || typeof r.threadId === "string")
+    value === undefined ||
+    (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
   );
 }
 
-/**
- * Canonical, workspace-relative POSIX path used for BOTH reported-event paths
- * and on-disk digest keys, so normalization can never cause a false out-of-band
- * classification. Containment is judged by path components, never string prefix.
- */
-export function canonicalizePath(input: string): string {
-  let p = input.replace(/\\/g, "/");
-  p = p.replace(/\/+/g, "/"); // collapse duplicate separators
-  const segments: string[] = [];
-  for (const seg of p.split("/")) {
-    if (seg === "" || seg === ".") continue;
-    if (seg === "..") {
-      segments.pop();
-      continue;
+function isValidResult(value: unknown): value is RunnerResult {
+  if (typeof value !== "object" || value === null) return false;
+  const r = value as Record<string, unknown>;
+  if (typeof r.output !== "string" || r.output.trim().length === 0) return false;
+  if (!(r.threadId === null || typeof r.threadId === "string")) return false;
+  // usage must be null or a plain object of safe non-negative integer counts.
+  if (r.usage !== null && r.usage !== undefined) {
+    if (typeof r.usage !== "object") return false;
+    const u = r.usage as Record<string, unknown>;
+    if (
+      !isSafeTokenCount(u.inputTokens) ||
+      !isSafeTokenCount(u.cachedInputTokens) ||
+      !isSafeTokenCount(u.outputTokens)
+    ) {
+      return false;
     }
-    segments.push(seg);
   }
-  return segments.join("/");
+  return true;
 }
+
 
 export class AgentService {
   private readonly activeExecutions = new Map<string, Promise<void>>();
@@ -594,22 +607,28 @@ export class AgentService {
     // Reconcile on EVERY terminal path (success, failure, cancel, timeout) to
     // gather complete evidence of any unauthorized on-disk change, including a
     // symlink that started escaping the workspace during the run.
-    const recon = await this.reconcile(snapshot, warrant, monitor.reportedPaths);
-    let outOfBand: string[] = [];
-    if (recon?.decision.verdict === "block") {
-      // A stray/over-budget/symlink-escape change is a violation regardless of
-      // how the runner itself terminated.
-      if (!violation) {
-        violation = new WarrantViolationError(
-          recon.decision.clause,
-          recon.decision.reason,
-          describeStray(recon),
-          recon.decision.subject,
-        );
-      }
-    } else if (recon) {
-      outOfBand = recon.outOfBand;
+    const recon = await this.reconcile(
+      snapshot,
+      warrant,
+      monitor.reportedPaths,
+      monitor.consumption.fileWrites,
+    );
+    if (recon.verdict === "block" && !violation) {
+      violation = new WarrantViolationError(
+        recon.decision.clause,
+        recon.decision.reason,
+        recon.stray.length > 0 ? recon.stray.join(", ") : recon.outOfBand.join(", "),
+        recon.decision.subject,
+      );
     }
+    // Structured evidence for EVERY outcome (finding 20).
+    const diagnostics: RunDiagnostics = {
+      changedPaths: recon.changed,
+      reportedPaths: [...monitor.reportedPaths].map(canonicalizePath).sort(),
+      outOfBandPaths: recon.outOfBand,
+      strayPaths: recon.stray,
+      reportedWriteCount: monitor.consumption.fileWrites,
+    };
 
     const clean = !hasError && !violation;
 
@@ -618,12 +637,15 @@ export class AgentService {
     // recovery (or a clean, persisted completion) — never before.
     let containment: RunContainment | null = null;
     let recoveryFailed = false;
+    let recoveryError: string | null = null;
     if (violation) {
-      containment = await this.contain(violation, snapshot, warrant, recon?.symlinkEscape === true);
+      containment = await this.contain(violation, snapshot, warrant, recon.symlinkEscape);
       recoveryFailed = containment.recoveryFailed;
+      recoveryError = containment.recoveryError;
     } else if (!clean) {
       const report = await this.cleanupRestore(snapshot);
       recoveryFailed = report.recoveryFailed;
+      recoveryError = report.recoveryError;
     }
 
     const outcome: AgentRun["status"] = violation
@@ -636,7 +658,7 @@ export class AgentService {
 
     // A blocked run always carries a descriptive error; recovery failures carry
     // the specific reason, never a generic string.
-    const message = this.terminalMessage(outcome, runError, containment, outOfBand);
+    const message = this.terminalMessage(outcome, runError, containment, diagnostics, recoveryError);
 
     let persisted = false;
     try {
@@ -661,7 +683,7 @@ export class AgentService {
                 ? "The execution warrant was revoked during the run"
                 : message;
           storedRun.containment = containment;
-          storedRun.diagnostics = outOfBand.length > 0 ? { outOfBandPaths: outOfBand } : null;
+          storedRun.diagnostics = diagnostics;
           storedRun.completedAt = completedAt;
           if (effectiveOutcome === "completed" && result) {
             storedRun.output = result.output;
@@ -680,7 +702,9 @@ export class AgentService {
           if (recoveryFailed) {
             agent.status = "error";
             agent.quarantined = true;
-            agent.quarantineReason = message ?? "Workspace recovery failed";
+            agent.quarantineReason =
+              (recoveryError ? "Recovery failed: " + recoveryError + ". " : "") +
+              (message ?? "Workspace recovery failed");
             agent.lastError = agent.quarantineReason;
           } else if (agent.status !== "stopped") {
             agent.status = hasError && !cancelled && !violation ? "error" : "ready";
@@ -714,7 +738,8 @@ export class AgentService {
     outcome: AgentRun["status"],
     runError: unknown,
     containment: RunContainment | null,
-    outOfBand: string[],
+    diagnostics: RunDiagnostics,
+    recoveryError: string | null,
   ): string | null {
     if (outcome === "completed") return null;
     if (outcome === "blocked" && containment) {
@@ -722,20 +747,21 @@ export class AgentService {
         "Blocked by " + containment.clause,
         containment.protectedAsset ? "path " + containment.protectedAsset : null,
         containment.recoveryFailed
-          ? "ROLLBACK FAILED (" + containment.reason + ")"
+          ? "ROLLBACK FAILED (" + (containment.recoveryError ?? containment.reason) + ")"
           : "rolled back " +
             (containment.rolledBack ? "yes" : "no") +
             ", digest " +
             (containment.digestMatches ? "match" : "MISMATCH"),
+        diagnostics.outOfBandPaths.length > 0
+          ? "out-of-band: " + diagnostics.outOfBandPaths.join(", ")
+          : null,
       ].filter((part): part is string => part !== null);
       return parts.join("; ");
     }
-    if (runError instanceof Error) return runError.message;
-    if (runError !== undefined) return "Run failed: " + String(runError);
-    if (outOfBand.length > 0) {
-      return "Completed with " + outOfBand.length + " unreported in-scope write(s)";
-    }
-    return "Run did not complete";
+    // failed / cancelled / timeout: record both the runner error and any recovery
+    // failure reason (findings 19), each distinct.
+    const runMsg = runError !== undefined ? safeErrorMessage(runError) : "Run did not complete";
+    return recoveryError ? runMsg + " | recovery: " + recoveryError : runMsg;
   }
 
   /**
@@ -745,15 +771,21 @@ export class AgentService {
    */
   private async cleanupRestore(
     snapshot: WorkspaceSnapshot,
-  ): Promise<{ recoveryFailed: boolean }> {
+  ): Promise<{ recoveryFailed: boolean; recoveryError: string | null }> {
     try {
       const report = await snapshot.restore();
       const ok = report.restored === true && report.digestMatches === true;
-      if (ok) await snapshot.discard().catch(() => undefined);
-      return { recoveryFailed: !ok };
-    } catch {
+      if (ok) {
+        await snapshot.discard().catch(() => undefined);
+        return { recoveryFailed: false, recoveryError: null };
+      }
+      return {
+        recoveryFailed: true,
+        recoveryError: "restore reported digest mismatch (restored=" + report.restored + ")",
+      };
+    } catch (error) {
       // Keep the snapshot: it is the only recovery copy.
-      return { recoveryFailed: true };
+      return { recoveryFailed: true, recoveryError: safeErrorMessage(error) };
     }
   }
 
@@ -792,13 +824,13 @@ export class AgentService {
       afterDigest: null,
       assetDigestMatches: false,
       recoveryFailed: false,
+      recoveryError: null,
       rolledBack: false,
       digestMatches: false,
       fileCount: 0,
     };
     if (!snapshot) {
-      // No snapshot means no rollback was possible: this is a recovery failure.
-      return { ...containment, recoveryFailed: true };
+      return { ...containment, recoveryFailed: true, recoveryError: "no snapshot to restore from" };
     }
     try {
       const report = await snapshot.restore();
@@ -821,14 +853,19 @@ export class AgentService {
         afterDigest,
         assetDigestMatches,
         recoveryFailed,
+        recoveryError: recoveryFailed
+          ? symlinkEscape
+            ? "external symlink target cannot be restored by in-workspace rollback"
+            : "digest verification failed after restore"
+          : null,
         rolledBack: report.restored,
         digestMatches: report.digestMatches,
         fileCount: report.fileCount,
       };
-    } catch {
+    } catch (error) {
       // Rollback threw: keep the snapshot; the workspace may still hold the
       // unauthorized change.
-      return { ...containment, recoveryFailed: true };
+      return { ...containment, recoveryFailed: true, recoveryError: safeErrorMessage(error) };
     }
   }
 
@@ -842,14 +879,23 @@ export class AgentService {
     snapshot: WorkspaceSnapshot,
     warrant: Warrant,
     reportedPaths: Set<string>,
+    reportedWriteCount: number,
   ): Promise<{
     decision: PolicyDecision;
-    paths: string[];
+    verdict: "allow" | "block";
+    changed: string[];
+    stray: string[];
     outOfBand: string[];
     symlinkEscape: boolean;
-  } | null> {
-    // Finding 1: a symlink that began escaping the workspace DURING the run wrote
-    // to an external file. Detect it first and fail closed.
+  }> {
+    const reported = new Set([...reportedPaths].map(canonicalizePath));
+    const base = {
+      changed: [] as string[],
+      stray: [] as string[],
+      outOfBand: [] as string[],
+    };
+
+    // Finding 1/5: a symlink that escaped the workspace DURING the run.
     try {
       await snapshot.assertNoEscape();
     } catch (error) {
@@ -857,13 +903,11 @@ export class AgentService {
         decision: {
           verdict: "block",
           clause: "scope.writePaths",
-          reason:
-            "A symlink escaped the workspace during the run: " +
-            (error instanceof Error ? error.message : String(error)),
+          reason: "A symlink escaped the workspace during the run: " + safeErrorMessage(error),
           subject: null,
         },
-        paths: [],
-        outOfBand: [],
+        verdict: "block",
+        ...base,
         symlinkEscape: true,
       };
     }
@@ -872,7 +916,6 @@ export class AgentService {
     try {
       after = await snapshot.currentDigest();
     } catch {
-      // Cannot read the workspace to verify it: fail closed.
       return {
         decision: {
           verdict: "block",
@@ -880,69 +923,69 @@ export class AgentService {
           reason: "The workspace could not be verified after the run",
           subject: null,
         },
-        paths: [],
-        outOfBand: [],
+        verdict: "block",
+        ...base,
         symlinkEscape: false,
       };
     }
 
     const changed = changedPaths(snapshot.digest, after).map(canonicalizePath);
-    const reported = new Set([...reportedPaths].map(canonicalizePath));
     const outOfBand = changed.filter((path) => !reported.has(path));
+    const stray = changed.filter((path) => !matchesAny(warrant.scope.writePaths, path));
+    const rich = { changed, stray, outOfBand };
 
     // 1) Any changed path outside the write scope is a violation.
-    const stray = changed.filter((path) => !matchesAny(warrant.scope.writePaths, path));
     if (stray.length > 0) {
       const offender = stray[0] ?? null;
       return {
         decision: {
           verdict: "block",
           clause: "scope.writePaths",
-          reason:
-            "Path '" + offender + "' changed on disk but is outside the warranted write scope",
+          reason: "Path '" + offender + "' changed on disk but is outside the warranted write scope",
           subject: offender,
         },
-        paths: stray,
-        outOfBand,
+        verdict: "block",
+        ...rich,
         symlinkEscape: false,
       };
     }
 
-    // 2) Budget backstop. maxFileWrites is the number of WRITE OPERATIONS. The
-    //    monitor already enforces the budget for reported writes during
-    //    execution; here we add the out-of-band (unreported) net changes so a
-    //    subprocess that silently created many files cannot slip past. A rename
-    //    is counted as its two net path changes (remove + add) by design.
-    const reportedWrites = warrant.scope.maxFileWrites; // upper bound already enforced live
-    void reportedWrites;
-    if (outOfBand.length > warrant.scope.maxFileWrites) {
+    // 2) Budget backstop (finding 6). maxFileWrites is the number of WRITE
+    //    OPERATIONS. The monitor already enforced the budget for REPORTED writes
+    //    during execution; the reconcile diff can only recover a LOWER BOUND of
+    //    the unreported operations (a rename shows as 2 net changes, a
+    //    create-then-delete as 0). We add that lower bound to the reported write
+    //    count so silent writes on top of an already-spent budget are caught.
+    const consumed = reportedWriteCount + outOfBand.length;
+    if (consumed > warrant.scope.maxFileWrites) {
       return {
         decision: {
           verdict: "block",
           clause: "scope.maxFileWrites",
           reason:
+            consumed +
+            " write operations (>= reported " +
+            reportedWriteCount +
+            " + " +
             outOfBand.length +
-            " unreported file changes on disk exceed the warranted budget of " +
+            " unreported) exceed the warranted budget of " +
             warrant.scope.maxFileWrites,
-          subject: outOfBand[warrant.scope.maxFileWrites] ?? null,
+          subject: outOfBand[0] ?? null,
         },
-        paths: outOfBand,
-        outOfBand,
+        verdict: "block",
+        ...rich,
         symlinkEscape: false,
       };
     }
 
-    // 3) In-scope, within budget, but some writes were never reported: record as
-    //    structured evidence without blocking.
-    if (outOfBand.length > 0) {
-      return {
-        decision: { verdict: "allow", clause: "scope.writePaths", reason: "out-of-band", subject: null },
-        paths: [],
-        outOfBand,
-        symlinkEscape: false,
-      };
-    }
-    return null;
+    // 3) In-scope, within budget. Out-of-band writes (if any) are recorded as
+    //    structured evidence but do not block.
+    return {
+      decision: { verdict: "allow", clause: "scope.writePaths", reason: "reconciled", subject: null },
+      verdict: "allow",
+      ...rich,
+      symlinkEscape: false,
+    };
   }
 
   private workspacePathFor(agentId: string): string {

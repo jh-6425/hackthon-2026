@@ -49,6 +49,7 @@ export interface RunContainment {
   afterDigest: string | null;
   assetDigestMatches: boolean;
   recoveryFailed: boolean;
+  recoveryError: string | null;
   rolledBack: boolean;
   digestMatches: boolean;
   fileCount: number;
@@ -108,7 +109,13 @@ export interface AgentRun {
   } | null;
   warrantId: string | null;
   containment: RunContainment | null;
-  diagnostics: { outOfBandPaths: string[] } | null;
+  diagnostics: {
+    changedPaths: string[];
+    reportedPaths: string[];
+    outOfBandPaths: string[];
+    strayPaths: string[];
+    reportedWriteCount: number;
+  } | null;
   createdAt: string;
 }
 

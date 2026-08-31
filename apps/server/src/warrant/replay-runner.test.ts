@@ -244,3 +244,29 @@ describe("ReplayRunner per-component + internal symlink (F13/F14)", () => {
     expect(await readFile(path.join(ws, "tests", "real.ts"), "utf8")).toBe("real"); // untouched
   });
 });
+
+describe("ReplayRunner __write default-reject (F12)", () => {
+  it.each([
+    ["agent_message + __write", { type: "item.completed", item: { id: "m1", type: "agent_message", text: "hi" } }],
+    ["unknown item + __write", { type: "item.completed", item: { id: "u1", type: "totally_unknown" } }],
+    ["file_change with no paths", { type: "item.completed", item: { id: "f1", type: "file_change", changes: [] } }],
+  ])("rejects %s", async (_label, event) => {
+    const ws = await workspace(false);
+    const file = await singleScenario(ws, [{ __write: { path: "tests/x.ts", content: "x" }, ...(event as object) }]);
+    roots.push(file);
+    await expect(
+      new ReplayRunner(file).run(req(ws, TASK, new ConformanceMonitor(warrant(), "r1", [ws]))),
+    ).rejects.toThrow(/must accompany a valid file_change|inconsistent/);
+  });
+
+  it("accepts a write whose reported path is equivalent but differently spelled", async () => {
+    const ws = await workspace(false);
+    const file = await singleScenario(ws, [
+      { __write: { path: "tests/ok.ts", content: "x" }, type: "item.completed", item: { id: "f1", type: "file_change", changes: [{ path: "tests/./ok.ts" }] } },
+    ]);
+    roots.push(file);
+    const monitor = new ConformanceMonitor({ ...warrant(), scope: { ...warrant().scope, writePaths: ["**"] } }, "r1", [ws]);
+    await new ReplayRunner(file).run(req(ws, TASK, monitor));
+    expect(await readFile(path.join(ws, "tests", "ok.ts"), "utf8")).toBe("x");
+  });
+});

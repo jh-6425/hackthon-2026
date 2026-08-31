@@ -4,6 +4,7 @@ import path from "node:path";
 import { parseCodexEventLine, violationError } from "../codex-runner.js";
 import { RunCancelledError } from "../errors.js";
 import { extractItem, itemToAction } from "./events.js";
+import { canonicalizePath } from "./glob.js";
 import type { AgentRunner, RunnerRequest, RunnerResult } from "../types.js";
 
 /**
@@ -100,12 +101,21 @@ export class ReplayRunner implements AgentRunner {
     event: Record<string, unknown>,
     workspaceRoots: string,
   ): void {
+    // Default-reject (finding 12): a __write is only permitted when the SAME
+    // event resolves to a single, valid file_change action whose reported path
+    // matches the write. A narrative/unknown/malformed event carrying __write is
+    // refused so it cannot bypass per-action policy.
     const item = extractItem(event);
     const action = item ? itemToAction(item, [workspaceRoots]) : null;
-    if (!action || action.kind !== "file_change") return;
-    const normalizedWrite = writePath.replace(/\\/g, "/").replace(/^\.\//, "");
-    const reported = action.paths.map((p) => p.replace(/^\.\//, ""));
-    if (!reported.includes(normalizedWrite)) {
+    if (!action || action.kind !== "file_change" || action.paths.length === 0) {
+      throw new Error(
+        "Replay __write must accompany a valid file_change event; got " +
+          (item?.type ?? "no item"),
+      );
+    }
+    const wanted = canonicalizePath(writePath);
+    const reported = action.paths.map((p) => canonicalizePath(p));
+    if (!reported.includes(wanted)) {
       throw new Error(
         "Replay scenario is inconsistent: it writes '" +
           writePath +

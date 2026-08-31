@@ -49,3 +49,30 @@ export function matchesAny(patterns: string[], candidate: string): boolean {
     globToRegExp(normalizePath(pattern)).test(target),
   );
 }
+
+
+/**
+ * Canonical workspace-relative POSIX path used for BOTH reported-event paths and
+ * on-disk digest keys so normalization can never cause a false out-of-band
+ * classification. POSIX filenames may legitimately contain a literal backslash,
+ * so backslash is NOT treated as a separator: "tests\\evil.ts" stays a single
+ * root-level filename and does NOT collapse into "tests/evil.ts". Only "/" is a
+ * separator; ".", "" and ".." segments are resolved lexically (a leading ".."
+ * is preserved so an escape stays visible).
+ */
+export function canonicalizePath(input: string): string {
+  const segments: string[] = [];
+  for (const seg of input.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (segments.length > 0 && segments[segments.length - 1] !== "..") {
+        segments.pop();
+      } else {
+        segments.push("..");
+      }
+      continue;
+    }
+    segments.push(seg);
+  }
+  return segments.join("/");
+}

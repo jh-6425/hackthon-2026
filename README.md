@@ -16,6 +16,8 @@ Agent acts outside what its task authorised.
 out-of-scope write to `src/parser.ts` killed and rolled back — scope is fixed by
 the deterministic local compiler (`tests/**`), and Ark only runs the Agent.
 
+See **[docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md)** for the exact prevention / detection / recovery boundary and known limitations.
+
 The offline replay (`npm run demo` / `npm run demo:web`) is the **deterministic
 evidence and on-stage fallback**: the same enforcement path with no Ark, no Dify,
 no external model, no API key, no Docker, no network.

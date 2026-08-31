@@ -90,6 +90,7 @@ export interface RunContainment {
   afterDigest: string | null;
   assetDigestMatches: boolean;
   recoveryFailed: boolean;
+  recoveryError: string | null;
   rolledBack: boolean;
   digestMatches: boolean;
   fileCount: number;

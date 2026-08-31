@@ -98,8 +98,11 @@ export interface RunnerRequest {
 }
 
 export interface RunDiagnostics {
-  // In-scope, within-budget writes that were not reported as file_change events.
+  changedPaths: string[];
+  reportedPaths: string[];
   outOfBandPaths: string[];
+  strayPaths: string[];
+  reportedWriteCount: number;
 }
 
 export interface AgentRunner {
